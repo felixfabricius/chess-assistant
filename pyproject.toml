@@ -1,0 +1,10 @@
+[project]
+name = "chess-assistant"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "python-chess>=1.999",
+    "reachy-mini[mujoco]>=1.7.3",
+]
