@@ -5,9 +5,11 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "anthropic>=0.109.1",
     "numpy>=2.4.6",
     "pillow>=12.2.0",
     "python-chess>=1.999",
+    "python-dotenv>=1.2.2",
     "reachy-mini[mujoco]>=1.7.3",
 ]
 
