@@ -32,9 +32,9 @@ def make_safe_pose(height_mm: float, pitch_deg: float):
 
     return pose, height_mm, pitch_deg
 
-def main(output_dir: Path = Path("data" / "raw_images")):
-    height_mm = # 10
-    pitch_deg = # 28
+def main(output_dir: Path = Path("data") / "raw_images"):
+    height_mm = 8
+    pitch_deg = 28
 
     last_sent_height = None
     last_sent_pitch = None
