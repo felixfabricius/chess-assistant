@@ -14,6 +14,9 @@ MAX_PITCH_DEG = 28
 HEIGHT_STEP_MM = 2
 PITCH_STEP_DEG = 2
 
+OPT_HEIGHT_MM = 8
+OPT_PITCH_MM = 26
+
 MOVE_DURATION = 0.25
 
 def clamp(value: float, lower: float, upper: float) -> float:
@@ -32,9 +35,20 @@ def make_safe_pose(height_mm: float, pitch_deg: float):
 
     return pose, height_mm, pitch_deg
 
+def position_robot():
+    with ReachyMini(media_backend="default") as mini:
+        pose = make_safe_pose(
+            OPT_HEIGHT_MM,
+            OPT_PITCH_MM
+        )[0]
+
+        mini.goto_target(pose, duration=MOVE_DURATION)
+
+        return
+
 def main(output_dir: Path = Path("data") / "raw_images"):
-    height_mm = 8
-    pitch_deg = 28
+    height_mm = OPT_HEIGHT_MM
+    pitch_deg = OPT_PITCH_MM
 
     last_sent_height = None
     last_sent_pitch = None

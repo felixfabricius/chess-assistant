@@ -14,12 +14,13 @@ def capture_image(output_dir: Path = Path("data/raw_images")) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    image_path = output_dir / f"reachy_board_{timestamp}.png"
+    image_dir = output_dir / f"reachy_board_{timestamp}"
+    image_dir.mkdir()
+    image_path = image_dir / "image.png"
 
     with ReachyMini(media_backend="default") as mini:
         frame = mini.media.get_frame()
 
-    print(image_path)
     cv2.imwrite(str(image_path), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
 
-    return image_path
+    return image_dir
