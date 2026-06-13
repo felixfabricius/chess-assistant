@@ -4,7 +4,7 @@ Script which is able to connect to Reachys's camera and take photos.
 from pathlib import Path
 from datetime import datetime
 
-from PIL import Image
+import cv2
 from reachy_mini import ReachyMini
 
 def capture_image(output_dir: Path = Path("data/raw_images")) -> Path:
@@ -18,9 +18,8 @@ def capture_image(output_dir: Path = Path("data/raw_images")) -> Path:
 
     with ReachyMini(media_backend="default") as mini:
         frame = mini.media.get_frame()
-    
-    image = Image.fromarray(frame)
+
     print(image_path)
-    image.save(image_path)
+    cv2.imwrite(str(image_path), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
 
     return image_path

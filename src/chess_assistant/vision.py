@@ -30,7 +30,8 @@ def infer_fen_from_image(image_path: Path) -> str:
         "not the full FEN. Example format (if in starting position): "
         "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR. "
         "Do not include side to move, castling rights, move counters, or explanation."
-        "Carefully inspect the position of EACH INDIVIDUAL PIECE."
+        "CAREFULLY inspect each of the 64 squares individually to identify which piece - if any - "
+        "is located there."
     )
 
     message = client.messages.create(
