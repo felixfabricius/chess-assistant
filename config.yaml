@@ -1,6 +1,6 @@
 root_data_folder: data
 setup_folder:
-  create_new: False
+  create_new: True
   measurements:
     # Distance from center of chessboard to nearest point of base of robot from birds eye view in cm
     dist: 25 

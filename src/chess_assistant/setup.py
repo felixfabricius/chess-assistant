@@ -21,7 +21,7 @@ def setup():
             config.get("setup_folder", {}).get("measurements", {}) 
             | {key: config.get("setup_folder", {}).get(key) for key in ["chessboard", "documentation_image"]}
         )
-        calibration_data = calibrate()
+        calibration_data = calibrate(setup_dir)
         
         with open(setup_dir / "metadata.json", "w", encoding="utf-8") as f:
             json.dump(setup_data | calibration_data, f, indent=2)

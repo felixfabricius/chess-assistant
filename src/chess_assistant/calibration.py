@@ -46,12 +46,82 @@ def position_robot(height, pitch):
 
         return
 
-def calibrate(output_dir: Path = Path("data") / "raw_images"):
+def click_board_corners(frame) -> dict[str, list[int]]:
+    """
+    Let the user click the four semantic board corners.
+
+    Click order:
+    1. a1
+    2. a8
+    3. h8
+    4. h1
+
+    Returns:
+        {
+            "a1": [x, y],
+            "a8": [x, y],
+            "h8": [x, y],
+            "h1": [x, y],
+        }
+    """
+    corner_labels = ["a1", "a8", "h8", "h1"]
+    corners: dict[str, list[int]] = {}
+
+    display = frame.copy()
+    window_name = "Click board corners: a1, a8, h8, h1"
+
+    def mouse_callback(event, x, y, flags, param):
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return
+
+        if len(corners) >= len(corner_labels):
+            return
+
+        label = corner_labels[len(corners)]
+        corners[label] = [x, y]
+
+        cv2.circle(display, (x, y), 6, (0, 0, 255), -1)
+        cv2.putText(
+            display,
+            label,
+            (x + 10, y - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 0, 255),
+            2,
+        )
+
+        print(f"Clicked {label}: ({x}, {y})")
+        cv2.imshow(window_name, display)
+
+    print("Click the board corners in this order:")
+    print("1. a1")
+    print("2. a8")
+    print("3. h8")
+    print("4. h1")
+    print("Press ESC to cancel.")
+
+    cv2.imshow(window_name, display)
+    cv2.setMouseCallback(window_name, mouse_callback)
+
+    while len(corners) < len(corner_labels):
+        key = cv2.waitKey(20) & 0xFF
+
+        if key == 27:  # ESC
+            cv2.destroyWindow(window_name)
+            raise RuntimeError("Corner clicking cancelled.")
+
+    cv2.destroyWindow(window_name)
+    return corners
+
+def calibrate(setup_dir: Path = Path("data") / "raw_images"):
     height_mm = OPT_HEIGHT_MM
     pitch_deg = OPT_PITCH_MM
 
     last_sent_height = None
     last_sent_pitch = None
+
+    corners_data_available = False
 
     with ReachyMini(media_backend="default") as mini:
         while True:
@@ -75,10 +145,39 @@ def calibrate(output_dir: Path = Path("data") / "raw_images"):
                 new_pitch_deg -= PITCH_STEP_DEG
             elif key == ord(" "):
                 if frame is not None:
-                    timestamp = datetime.datetime.now().strftime("%y-%m-%d_%H%M%S")
-                    output_path = output_dir / f"reachy_board_{timestamp}.png"
-                    cv2.imwrite("calibration_view.jpg", frame)
-                print(f"Saved. height_mm={height_mm}, pitch_deg={pitch_deg}")
+                    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+
+                    raw_image_path = setup_dir / "raw.png"
+                    metadata_path = setup_dir / "calibration_metadata.json"
+
+                    # Freeze current frame and save it
+                    frozen_frame = frame.copy()
+                    cv2.imwrite(str(raw_image_path), frozen_frame)
+
+                    # Let user click semantic board corners
+                    corners_px = click_board_corners(frozen_frame)
+
+                    corners_data = {
+                        "corner_order": ["a1", "a8", "h8", "h1"],
+                        "corners_px": corners_px,
+                        "warp_convention": {
+                            "a8": [0, 0],
+                            "h8": ["board_size_px", 0],
+                            "h1": ["board_size_px", "board_size_px"],
+                            "a1": [0, "board_size_px"],
+                        },
+                        "notes": (
+                            "Warp convention assumes that a8 is in top left of image."
+                        ),
+                        "raw_image_path": str(raw_image_path)
+                    }
+                    print(f"Saved calibration image to: {raw_image_path}")
+                    print(f"Saved calibration metadata to: {metadata_path}")
+                    print(f"height_mm={height_mm}, pitch_deg={pitch_deg}")
+                    print(f"corners_px={corners_px}")
+
+                    corners_data_available = True
+                    break
             elif key == ord("q"):
                 break
             else:
@@ -135,7 +234,7 @@ def calibrate(output_dir: Path = Path("data") / "raw_images"):
             "a8": 1,
             "h8": 1,
             "h1": 1
-        }
+        } | corners_data if corners_data_available else {}
 
 
 if __name__ == "__main__":
