@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from chess_assistant.calibration import position_robot
+from chess_assistant.setup import setup
 from chess_assistant.camera import capture_image
 from chess_assistant.vision import infer_fen_from_image
 
@@ -9,10 +9,14 @@ import json
 from datetime import datetime
 
 def main() -> None:
-    position_robot()
-
-    image_dir = capture_image()
+    setup_dir, pixel_coordinates = setup()
+    image_dir = capture_image(setup_dir)
     print(f"Saved image to: {image_dir / "image.png"}")
+
+    """
+    TODO: slice the image into squares. This requires: coordinates of the four corners.
+    These can be stored in the setup_dir metadata (or perhaps also as local variables?)
+    """
 
     # Test this with default 
     # board_position = infer_fen_from_image(image_path)

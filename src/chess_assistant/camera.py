@@ -7,11 +7,12 @@ from datetime import datetime
 import cv2
 from reachy_mini import ReachyMini
 
-def capture_image(output_dir: Path = Path("data/raw_images")) -> Path:
+def capture_image(output_dir: Path) -> Path:
     """
     Capture on frame from Reachy's camera and save it as a PNG.
     """
-    output_dir.mkdir(parents=True, exist_ok=True)
+    assert isinstance(output_dir, Path)
+    assert output_dir.is_dir()
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     image_dir = output_dir / f"reachy_board_{timestamp}"

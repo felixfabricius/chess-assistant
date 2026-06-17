@@ -1,0 +1,17 @@
+root_data_folder: data
+setup_folder:
+  create_new: False
+  measurements:
+    # Distance from center of chessboard to nearest point of base of robot from birds eye view in cm
+    dist: 25 
+    # Elevation of base of robot from table (on which chessboard also stands)
+    height: 13
+    # Degrees by which the chessboard would have to be rotated around its center clockwise so that
+    # base of robot is perfectly parallel to it 
+    rotation: 22.5
+    # Assume the robot was oriented (body) such that it's gaze is parallel to a column on chess board.
+    # By how many centimeters would it have to be moved (left -, right +) to be in the middle of the chess board?
+    # (Note that some offset might be ideal for image quality.) 
+    offset: 12.5
+  chessboard: 0
+  documentation_image: 2026/06/17_19:41

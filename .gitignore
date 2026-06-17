@@ -13,6 +13,8 @@ wheels/
 .env
 
 # Images
+data/
 data/raw_images/*.png
 data/raw_images/*.jpg
 data/raw_images/*.jpeg
+

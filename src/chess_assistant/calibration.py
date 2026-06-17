@@ -35,18 +35,18 @@ def make_safe_pose(height_mm: float, pitch_deg: float):
 
     return pose, height_mm, pitch_deg
 
-def position_robot():
+def position_robot(height, pitch):
     with ReachyMini(media_backend="default") as mini:
         pose = make_safe_pose(
-            OPT_HEIGHT_MM,
-            OPT_PITCH_MM
+            height,
+            pitch
         )[0]
 
         mini.goto_target(pose, duration=MOVE_DURATION)
 
         return
 
-def main(output_dir: Path = Path("data") / "raw_images"):
+def calibrate(output_dir: Path = Path("data") / "raw_images"):
     height_mm = OPT_HEIGHT_MM
     pitch_deg = OPT_PITCH_MM
 
@@ -127,6 +127,16 @@ def main(output_dir: Path = Path("data") / "raw_images"):
 
         cv2.destroyAllWindows()
 
+        return {
+            "height": last_sent_height,
+            "pitch": last_sent_pitch,
+            # Also return the 4 coordinates
+            "a1": 1,
+            "a8": 1,
+            "h8": 1,
+            "h1": 1
+        }
+
 
 if __name__ == "__main__":
-    main()
+    calibrate()
