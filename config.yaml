@@ -15,3 +15,6 @@ setup_folder:
     offset: 12.5
   chessboard: 0
   documentation_image: 2026/06/17_19:41
+
+image_processing:
+  size: 400

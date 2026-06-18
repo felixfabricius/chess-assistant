@@ -15,7 +15,7 @@ def capture_image(output_dir: Path) -> Path:
     assert output_dir.is_dir()
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    image_dir = output_dir / f"reachy_board_{timestamp}"
+    image_dir = output_dir / f"board_{timestamp}"
     image_dir.mkdir()
     image_path = image_dir / "image.png"
 
