@@ -228,12 +228,7 @@ def calibrate(setup_dir: Path = Path("data") / "raw_images"):
 
         return {
             "height": last_sent_height,
-            "pitch": last_sent_pitch,
-            # Also return the 4 coordinates
-            "a1": 1,
-            "a8": 1,
-            "h8": 1,
-            "h1": 1
+            "pitch": last_sent_pitch
         } | corners_data if corners_data_available else {}
 
 
