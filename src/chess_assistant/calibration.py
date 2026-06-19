@@ -1,9 +1,11 @@
-from reachy_mini import ReachyMini
-from reachy_mini.utils import create_head_pose
-import cv2
+import json
 import time
 from datetime import datetime
 from pathlib import Path
+
+import cv2
+from reachy_mini import ReachyMini
+from reachy_mini.utils import create_head_pose
 
 MIN_HEIGHT_MM = -40
 MAX_HEIGHT_MM = 21
@@ -19,8 +21,10 @@ OPT_PITCH_MM = 26
 
 MOVE_DURATION = 0.25
 
+
 def clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(value, upper))
+
 
 def make_safe_pose(height_mm: float, pitch_deg: float):
     height_mm = clamp(height_mm, MIN_HEIGHT_MM, MAX_HEIGHT_MM)
@@ -35,93 +39,102 @@ def make_safe_pose(height_mm: float, pitch_deg: float):
 
     return pose, height_mm, pitch_deg
 
+
 def position_robot(height, pitch):
     with ReachyMini(media_backend="default") as mini:
-        pose = make_safe_pose(
-            height,
-            pitch
-        )[0]
-
+        pose = make_safe_pose(height, pitch)[0]
         mini.goto_target(pose, duration=MOVE_DURATION)
 
-        return
 
-def click_board_corners(frame) -> dict[str, list[int]]:
+def click_labeled_points_with_review(
+    frame,
+    labels: list[str],
+    window_name: str,
+    polygon_order: list[str] | None = None,
+    point_color: tuple[int, int, int] = (0, 0, 255),
+    line_color: tuple[int, int, int] = (0, 255, 0),
+) -> dict[str, list[int]] | None:
     """
-    Let the user click the four semantic board corners.
+    Collect labeled point clicks on a frozen frame, then show a review overlay.
 
-    Click order:
-    1. a1
-    2. a8
-    3. h8
-    4. h1
-
-    Returns:
-        {
-            "a1": [x, y],
-            "a8": [x, y],
-            "h8": [x, y],
-            "h1": [x, y],
-        }
+    Returns a dict mapping label -> [x, y], or None if the user aborts.
+    Loops until the user accepts or aborts, allowing retries.
     """
-    corner_labels = ["a1", "a8", "h8", "h1"]
-    corners: dict[str, list[int]] = {}
+    order = polygon_order if polygon_order is not None else labels
 
-    display = frame.copy()
-    window_name = "Click board corners: a1, a8, h8, h1"
+    while True:
+        points: dict[str, list[int]] = {}
+        display = frame.copy()
 
-    def mouse_callback(event, x, y, flags, param):
-        if event != cv2.EVENT_LBUTTONDOWN:
-            return
+        def mouse_callback(event, x, y, flags, param):
+            if event != cv2.EVENT_LBUTTONDOWN:
+                return
+            if len(points) >= len(labels):
+                return
+            label = labels[len(points)]
+            points[label] = [x, y]
+            cv2.circle(display, (x, y), 6, point_color, -1)
+            cv2.putText(
+                display, label, (x + 10, y - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, point_color, 2,
+            )
+            print(f"  Clicked {label}: ({x}, {y})")
+            cv2.imshow(window_name, display)
 
-        if len(corners) >= len(corner_labels):
-            return
+        print(f"\n{window_name}")
+        print(f"Click in order: {', '.join(labels)}")
+        print("ESC to abort.")
 
-        label = corner_labels[len(corners)]
-        corners[label] = [x, y]
-
-        cv2.circle(display, (x, y), 6, (0, 0, 255), -1)
-        cv2.putText(
-            display,
-            label,
-            (x + 10, y - 10),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (0, 0, 255),
-            2,
-        )
-
-        print(f"Clicked {label}: ({x}, {y})")
+        cv2.namedWindow(window_name)
         cv2.imshow(window_name, display)
+        cv2.setMouseCallback(window_name, mouse_callback)
 
-    print("Click the board corners in this order:")
-    print("1. a1")
-    print("2. a8")
-    print("3. h8")
-    print("4. h1")
-    print("Press ESC to cancel.")
+        aborted = False
+        while len(points) < len(labels):
+            key = cv2.waitKey(20) & 0xFF
+            if key == 27:  # ESC
+                aborted = True
+                break
 
-    cv2.imshow(window_name, display)
-    cv2.setMouseCallback(window_name, mouse_callback)
+        cv2.setMouseCallback(window_name, lambda *a: None)
 
-    while len(corners) < len(corner_labels):
-        key = cv2.waitKey(20) & 0xFF
-
-        if key == 27:  # ESC
+        if aborted:
             cv2.destroyWindow(window_name)
-            raise RuntimeError("Corner clicking cancelled.")
+            return None
 
-    cv2.destroyWindow(window_name)
-    return corners
+        # Draw review overlay: polygon lines + instructions
+        review = display.copy()
+        pts = [points[lbl] for lbl in order if lbl in points]
+        for i in range(len(pts)):
+            cv2.line(review, tuple(pts[i]), tuple(pts[(i + 1) % len(pts)]), line_color, 2)
+        cv2.putText(
+            review,
+            "ENTER/SPACE: accept   ESC/r: retry   q: abort",
+            (10, review.shape[0] - 15),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2,
+        )
+        cv2.imshow(window_name, review)
+        print("Review: ENTER/SPACE to accept, ESC/r to retry, q to abort.")
 
-def calibrate(setup_dir: Path = Path("data") / "raw_images"):
+        while True:
+            key = cv2.waitKey(20) & 0xFF
+            if key in (13, ord(" ")):  # ENTER or SPACE → accept
+                cv2.destroyWindow(window_name)
+                return points
+            elif key in (27, ord("r")):  # ESC or r → retry
+                print("Retrying...")
+                break  # restart outer while loop
+            elif key == ord("q"):  # q → abort
+                cv2.destroyWindow(window_name)
+                return None
+
+
+def calibrate(setup_dir: Path = Path("data") / "raw_images") -> dict | None:
     height_mm = OPT_HEIGHT_MM
     pitch_deg = OPT_PITCH_MM
 
     last_sent_height = None
     last_sent_pitch = None
-
-    corners_data_available = False
 
     with ReachyMini(media_backend="default") as mini:
         while True:
@@ -144,93 +157,237 @@ def calibrate(setup_dir: Path = Path("data") / "raw_images"):
             elif key == ord("k"):
                 new_pitch_deg -= PITCH_STEP_DEG
             elif key == ord(" "):
-                if frame is not None:
-                    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+                if frame is None:
+                    continue
 
-                    raw_image_path = setup_dir / "raw.png"
-                    metadata_path = setup_dir / "calibration_metadata.json"
+                frozen_frame = frame.copy()
+                timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
 
-                    # Freeze current frame and save it
-                    frozen_frame = frame.copy()
-                    cv2.imwrite(str(raw_image_path), frozen_frame)
+                actual_corners_px = click_labeled_points_with_review(
+                    frozen_frame,
+                    labels=["a1", "a8", "h8", "h1"],
+                    window_name="Click actual board corners",
+                    polygon_order=["a8", "h8", "h1", "a1"],
+                )
+                if actual_corners_px is None:
+                    cv2.destroyAllWindows()
+                    return None
 
-                    # Let user click semantic board corners
-                    corners_px = click_board_corners(frozen_frame)
+                extended_corners_px = click_labeled_points_with_review(
+                    frozen_frame,
+                    labels=["a1", "a8", "h8", "h1"],
+                    window_name="Click extended/padded board corners",
+                    polygon_order=["a8", "h8", "h1", "a1"],
+                    point_color=(255, 128, 0),
+                    line_color=(0, 165, 255),
+                )
+                if extended_corners_px is None:
+                    cv2.destroyAllWindows()
+                    return None
 
-                    corners_data = {
-                        "corner_order": ["a1", "a8", "h8", "h1"],
-                        "corners_px": corners_px,
-                        "warp_convention": {
-                            "a8": [0, 0],
-                            "h8": ["board_size_px", 0],
-                            "h1": ["board_size_px", "board_size_px"],
-                            "a1": [0, "board_size_px"],
-                        },
-                        "notes": (
-                            "Warp convention assumes that a8 is in top left of image."
-                        ),
-                        "raw_image_path": str(raw_image_path)
-                    }
-                    print(f"Saved calibration image to: {raw_image_path}")
-                    print(f"Saved calibration metadata to: {metadata_path}")
-                    print(f"height_mm={height_mm}, pitch_deg={pitch_deg}")
-                    print(f"corners_px={corners_px}")
+                setup_dir.mkdir(parents=True, exist_ok=True)
+                raw_image_path = setup_dir / "raw.png"
+                metadata_path = setup_dir / "calibration_metadata.json"
 
-                    corners_data_available = True
-                    break
+                cv2.imwrite(str(raw_image_path), frozen_frame)
+
+                calibration_data = {
+                    "height_mm": last_sent_height,
+                    "pitch_deg": last_sent_pitch,
+                    "timestamp": timestamp,
+                    "actual_corner_order": ["a1", "a8", "h8", "h1"],
+                    "actual_corners_px": actual_corners_px,
+                    "camera_natural_orientation": infer_camera_natural_corner_order(actual_corners_px),
+                    "extended_corner_order": ["a1", "a8", "h8", "h1"],
+                    "extended_corners_px": extended_corners_px,
+                    "warp_convention": {
+                        "a8": [0, 0],
+                        "h8": ["board_size_px", 0],
+                        "h1": ["board_size_px", "board_size_px"],
+                        "a1": [0, "board_size_px"],
+                    },
+                    "notes": (
+                        "Actual corners define the chessboard grid. "
+                        "Extended corners define a padded region for later crop/padding estimation."
+                    ),
+                    "raw_image_path": str(raw_image_path),
+                }
+
+                with metadata_path.open("w", encoding="utf-8") as f:
+                    json.dump(calibration_data, f, indent=2)
+
+                print(f"Saved raw image: {raw_image_path}")
+                print(f"Saved calibration metadata: {metadata_path}")
+
+                cv2.destroyAllWindows()
+                return calibration_data
+
             elif key == ord("q"):
-                break
+                cv2.destroyAllWindows()
+                return None
             else:
                 continue
 
-            # Clamp requested values before sending to robot
-            pose, safe_height, safe_pitch = make_safe_pose(
-                new_height_mm,
-                new_pitch_deg,
-            )
+            # Clamp and move robot
+            pose, safe_height, safe_pitch = make_safe_pose(new_height_mm, new_pitch_deg)
 
-            # If clamping changed the requested value, tell yourself
             if safe_height != new_height_mm or safe_pitch != new_pitch_deg:
                 print(
                     "Requested pose outside safe range. "
                     f"Clamped to height={safe_height}, pitch={safe_pitch}"
                 )
 
-            # Avoid spamming the robot with the same command repeatedly
-            if (
-                safe_height != last_sent_height
-                or safe_pitch != last_sent_pitch
-            ):
+            if safe_height != last_sent_height or safe_pitch != last_sent_pitch:
                 print(f"Moving to height={safe_height}, pitch={safe_pitch}")
-
                 try:
-                    mini.set_target(
-                        head=pose,
-                        #duration=MOVE_DURATION,
-                        body_yaw=None,
-                    )
-
+                    mini.set_target(head=pose, body_yaw=None)
                     height_mm = safe_height
                     pitch_deg = safe_pitch
                     last_sent_height = safe_height
                     last_sent_pitch = safe_pitch
-
                     time.sleep(MOVE_DURATION)
-
                 except Exception as e:
                     print("Move failed:", e)
-                    print(
-                        f"Keeping previous pose: "
-                        f"height={height_mm}, pitch={pitch_deg}"
-                    )
+                    print(f"Keeping previous pose: height={height_mm}, pitch={pitch_deg}")
 
+
+def infer_camera_natural_corner_order(corners_px: dict[str, list[int]]) -> dict:
+    """
+    Infer which semantic board corner sits in each visual quadrant (top-left,
+    top-right, bottom-right, bottom-left) using pixel-coordinate comparisons.
+
+    Tries all four cyclic orderings of the four corners and scores each by
+    counting how many expected image-coordinate inequalities hold.
+    Smaller x → further left; smaller y → higher up (image convention).
+    """
+    candidates = [
+        ["a8", "h8", "h1", "a1"],
+        ["h8", "h1", "a1", "a8"],
+        ["h1", "a1", "a8", "h8"],
+        ["a1", "a8", "h8", "h1"],
+    ]
+
+    def x(label: str) -> int:
+        return corners_px[label][0]
+
+    def y(label: str) -> int:
+        return corners_px[label][1]
+
+    scored = []
+    for candidate in candidates:
+        tl, tr, br, bl = candidate
+        score = sum([
+            x(tl) < x(tr),
+            x(bl) < x(br),
+            y(tl) < y(bl),
+            y(tr) < y(br),
+            x(tl) < x(br),
+            x(bl) < x(tr),
+            y(tl) < y(br),
+            y(tr) < y(bl),
+        ])
+        scored.append({"order": candidate, "score": score})
+
+    scored.sort(key=lambda e: e["score"], reverse=True)
+    best = scored[0]
+    tl, tr, br, bl = best["order"]
+
+    return {
+        "order": {
+            "tl": tl,
+            "tr": tr,
+            "br": br,
+            "bl": bl,
+        },
+        "score": best["score"],
+        "all_scores": scored,
+        "ambiguous": scored[0]["score"] == scored[1]["score"],
+    }
+
+
+def annotate_existing(image_path: Path) -> dict | None:
+    """
+    Load a stored raw image, collect corner annotations interactively, and
+    write (or overwrite) calibration_metadata.json in the same directory.
+
+    Existing metadata fields (height_mm, pitch_deg, timestamp, …) are
+    preserved; only corner fields are replaced.
+
+    Usage:
+        python -m chess_assistant.calibration data/2026-06-17_210454/raw.png
+    """
+    image_path = Path(image_path)
+    if not image_path.exists():
+        print(f"Image not found: {image_path}")
+        return None
+
+    frame = cv2.imread(str(image_path))
+    if frame is None:
+        print(f"Failed to load image: {image_path}")
+        return None
+
+    setup_dir = image_path.parent
+    metadata_path = setup_dir / "calibration_metadata.json"
+
+    existing: dict = {}
+    if metadata_path.exists():
+        with metadata_path.open(encoding="utf-8") as f:
+            existing = json.load(f)
+        print(f"Loaded existing metadata from: {metadata_path}")
+
+    actual_corners_px = click_labeled_points_with_review(
+        frame,
+        labels=["a1", "a8", "h8", "h1"],
+        window_name="Click actual board corners",
+        polygon_order=["a8", "h8", "h1", "a1"],
+    )
+    if actual_corners_px is None:
         cv2.destroyAllWindows()
+        return None
 
-        return {
-            "height": last_sent_height,
-            "pitch": last_sent_pitch
-        } | corners_data if corners_data_available else {}
+    extended_corners_px = click_labeled_points_with_review(
+        frame,
+        labels=["a1", "a8", "h8", "h1"],
+        window_name="Click extended/padded board corners",
+        polygon_order=["a8", "h8", "h1", "a1"],
+        point_color=(255, 128, 0),
+        line_color=(0, 165, 255),
+    )
+    if extended_corners_px is None:
+        cv2.destroyAllWindows()
+        return None
+
+    calibration_data = {
+        **existing,
+        "actual_corner_order": ["a1", "a8", "h8", "h1"],
+        "actual_corners_px": actual_corners_px,
+        "camera_natural_orientation": infer_camera_natural_corner_order(actual_corners_px),
+        "extended_corner_order": ["a1", "a8", "h8", "h1"],
+        "extended_corners_px": extended_corners_px,
+        "warp_convention": {
+            "a8": [0, 0],
+            "h8": ["board_size_px", 0],
+            "h1": ["board_size_px", "board_size_px"],
+            "a1": [0, "board_size_px"],
+        },
+        "notes": (
+            "Actual corners define the chessboard grid. "
+            "Extended corners define a padded region for later crop/padding estimation."
+        ),
+        "raw_image_path": str(image_path),
+    }
+
+    with metadata_path.open("w", encoding="utf-8") as f:
+        json.dump(calibration_data, f, indent=2)
+
+    print(f"Saved calibration metadata: {metadata_path}")
+    cv2.destroyAllWindows()
+    return calibration_data
 
 
 if __name__ == "__main__":
-    calibrate()
+    import sys
+    if len(sys.argv) > 1:
+        annotate_existing(Path(sys.argv[1]))
+    else:
+        calibrate()

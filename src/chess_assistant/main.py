@@ -3,6 +3,7 @@ from pathlib import Path
 from chess_assistant.setup import setup
 from chess_assistant.camera import capture_image
 from chess_assistant.vision import infer_fen_from_image
+from chess_assistant.image_processing import Processor
 
 
 import json
@@ -39,4 +40,7 @@ def main() -> None:
         json.dump(metadata, f, indent=2)
 
 if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1:
+
     main()

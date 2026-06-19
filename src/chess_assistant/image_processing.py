@@ -5,7 +5,7 @@ from omegaconf import OmegaConf
 import json
 
 class Processor:
-    def __init__(self, board_image_path: Path, metadata_path: Path, config_path: Path | None = None) -> None:
+    def __init__(self, metadata_path: Path, config_path: Path | None = None) -> None:
         """
         Store attributes:
         - how many pixels to allocate for padding in each direction
@@ -21,13 +21,13 @@ class Processor:
         last_coordinate = board_size - 1
 
         # Load metadata
-        with open(metadata_path, "r", encoding="urf-8") as f:
+        with open(metadata_path, "r", encoding="utf-8") as f:
             metadata = json.load(f)
 
         # TODO
         # Order of ordered_corners
         # Dict which stores e.g. {"tl": "a8"}
-        self.corner_map = metadata["ordered_corners"]
+        self.corner_map = metadata["camera_natural_orientation"]["order"]
 
         src = np.array(
             [
@@ -41,7 +41,7 @@ class Processor:
         dst_initial = np.array(
             [
                 [0, 0], # top-left
-                [last_coordinate, 0] # top_right
+                [last_coordinate, 0], # top_right
                 [last_coordinate, last_coordinate],
                 [0, last_coordinate]
             ],
@@ -88,15 +88,15 @@ class Processor:
                 # if < 0, extended corner is further above
             # Can extract padding by taking the maximum of these dimensions
         # p_up: 'padding_up'. How many pixels to add to top? of square
-        p_up = 1.1 * max(np.max(-pixel_differences, axis=0)[1], 0)
+        p_up = round(1.05 * max(np.max(-pixel_differences, axis=0)[1], 0))
             # Take maximum of negative difference 
             # (negative means extended corner is above actual corner)
             # across the 4 corners.
             # Also floor padding in every direction at 0.
-        p_down = 1.1 * max(np.max(pixel_differences, axis=0)[1], 0)
+        p_down = round(1.05 * max(np.max(pixel_differences, axis=0)[1], 0))
 
-        p_left = 1.1 * max(np.max(-pixel_differences, axis=0)[0], 0)
-        p_right = 1.1 * max(np.max(pixel_differences, axis=0)[1], 0)
+        p_left = round(1.05 * max(np.max(-pixel_differences, axis=0)[0], 0))
+        p_right = round(1.05 * max(np.max(pixel_differences, axis=0)[0], 0))
 
         padding = {
             "up": p_up,
@@ -109,26 +109,18 @@ class Processor:
         size_x = board_size + padding["left"] + padding["right"]
         size_y = board_size + padding["up"] + padding["down"]
 
-        dst_initial = np.array(
-            [
-                [0, 0], # top-left
-                [last_coordinate, 0] # top_right
-                [last_coordinate, last_coordinate],
-                [0, last_coordinate]
-            ],
-            dtype=np.float32
-        )
-
         # Modify destination coordinates of the board corners to account for padding
         dst = np.array(
             [
-                [padding["left"], padding["top"]], # top-left
-                [padding["left"] + size_x, padding["top"]], # top-right
-                [padding["left"] + size_x, padding["top"] + size_y], # bottom-right
-                [padding["left"], padding["top"] + size_y]
-            ]
+                [padding["left"], padding["up"]], # top-left
+                [padding["left"] + board_size, padding["up"]], # top-right
+                [padding["left"] + board_size, padding["up"] + board_size], # bottom-right
+                [padding["left"], padding["up"] + board_size]
+            ],
+            dtype=np.float32
         )
-
+        print(src, dst)
+        print((size_x, size_y))
         matrix = cv2.getPerspectiveTransform(src, dst)
         
         # Store attributes
@@ -139,8 +131,11 @@ class Processor:
 
     def warp(self, image_path: Path) -> Path:
         image = cv2.imread(image_path)
-        warped_image = cv2.warpPerspective(image, self.matrix, self.size)
-        warped_image_path = image_path.parent / image_path.stem + "_warped.png"
+        print(image.shape)
+        print(self.matrix)
+        print(self.image_size)
+        warped_image = cv2.warpPerspective(image, self.matrix, self.image_size)
+        warped_image_path = image_path.parent / (str(image_path.stem) + "_warped.png")
         cv2.imwrite(str(warped_image_path), warped_image)
         # Note that in this case there is no need to specify some color map transformation
         # That is only needed, when passing the image to something that expects RGB
@@ -203,6 +198,7 @@ class Processor:
 
 
         """
+        warped_image = cv2.imread(warped_image_path)
         # We loop over the pixel coordinates of the bottom left corner of different squares.
         # We start at the bottom left corner of the top-left square.
         # Then via the outer for-loop we increment the vertical coordinate.
@@ -251,23 +247,53 @@ class Processor:
         tl_y = self.padding["up"]
         tl_x = self.padding["left"]
 
+        squares_folder = warped_image_path.parent / "squares"
+        squares_folder.mkdir(exist_ok=True) # exist_ok=True for debugging purposes
+
         for i in range(8):
             for j in range(8):
-                top = tl_y - i * square_size - self.padding["up"]
-                bottom = tl_y - (i + 1) * square_size + self.padding["down"]
+                top = tl_y + i * square_size - self.padding["up"]
+                bottom = tl_y + (i + 1) * square_size + self.padding["down"]
                 left = tl_x + j * square_size - self.padding["left"]
                 right = tl_x + (j + 1) * square_size + self.padding["right"]
 
                 square_label = (
-                    label_map[j] + label_map[i] if not is_reverse 
-                    else label_map[i] + label_map[j]
+                    label_map[1][j] + label_map[0][i] if not is_reverse 
+                    else label_map[0][i] + label_map[1][j]
                 )
 
                 # Create cutout
-                cutout = 
-                    
+                # Cropping works using numpy slices.
+                # Axis 0: y, axis 1: x, axis 2: colours
+                square_cutout = warped_image[top:bottom, left:right]
+                if square_label == "a8":
+                    print("\n")
+                    print(f"tl_y: {tl_y}, tl_x: {tl_x}")
+                    print(f"top: {top}, bottom: {bottom}, left: {left}, right: {right}")
+                    print(warped_image.shape)
+                    print(square_cutout.shape)
+                    cv2.imshow("a8", square_cutout)
+                # Square path
+                # Folder structure will be:
+                    # board setup (with raw.png and metadata)
+                    # many snapshots.
+                        # snapshot
+                        # warped_image
+                        # cutouts
+                square_folder = squares_folder / square_label
+                square_folder.mkdir(exist_ok=True) # exist_ok=True for debugging purposes                
 
-        for i, rank in enumerate([str(i) for i in range(8)]):
-            # TODO: maybe refactor.
-            for j, file in enumerate(files): 
-                
+                # Save cutout
+                cv2.imwrite(str(square_folder / f"{square_label}.png") , square_cutout)
+
+if __name__ == "__main__":
+    import sys
+    assert len(sys.argv) == 4
+    # Pass the arguments that Processor class requires when initialised:
+        # metadata_path
+        # config_path
+    # And also pass the argument that warp method requires:
+        # image path
+    processor = Processor(sys.argv[1], sys.argv[2])
+    warped_path = processor.warp(Path(sys.argv[3]))
+    processor.cutout(warped_path)
