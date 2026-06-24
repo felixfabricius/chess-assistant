@@ -21,6 +21,7 @@ image_processing:
 
 vision:
   model: LLM
+  model_version: claude-opus-4-8
   prompt_version: 1
   
   

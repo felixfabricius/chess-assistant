@@ -3,7 +3,7 @@ from omegaconf import OmegaConf
 
 from chess_assistant.setup import setup
 from chess_assistant.camera import capture_image
-from chess_assistant.vision import infer_fen_from_image, classify_squares
+from chess_assistant.vision import BoardEstimator
 from chess_assistant.image_processing import Processor
 
 
@@ -15,7 +15,9 @@ def main() -> None:
 
     setup_dir, pixel_coordinates = setup()
     image_processor = Processor(setup_dir / "calibration_metadata.json", "config.yaml")
-
+    board_estimator = BoardEstimator(config)
+    position_estimator = 
+    chess_interpreter = ChessInterpreter()
     # Build game loop
     i = 0
     while True:
@@ -23,9 +25,11 @@ def main() -> None:
         image_dir = capture_image(setup_dir)
         # Warp and cut out squares
         warped_image_path = image_processor.warp(image_dir / "image.png")
-        image_processor.cutout(warped_image_path)
+        squares_dir = image_processor.cutout(warped_image_path)
+        board_prediction = BoardPredictor.classify_board(squares_dir)
 
-        classify_squares(image_dir, config)
+        # Recognise chess board position
+        (image_dir, config)
         
         # Classify individual squares
             # provide the squares folder.

@@ -242,8 +242,8 @@ class Processor:
         tl_y = self.padding["up"]
         tl_x = self.padding["left"]
 
-        squares_folder = warped_image_path.parent / "squares"
-        squares_folder.mkdir(exist_ok=True) # exist_ok=True for debugging purposes
+        squares_dir = warped_image_path.parent / "squares"
+        squares_dir.mkdir(exist_ok=True) # exist_ok=True for debugging purposes
 
         for i in range(8):
             for j in range(8):
@@ -296,12 +296,14 @@ class Processor:
                         # snapshot
                         # warped_image
                         # cutouts
-                square_folder = squares_folder / square_label
-                square_folder.mkdir(exist_ok=True) # exist_ok=True for debugging purposes                
+                square_dir = squares_dir / square_label
+                square_dir.mkdir(exist_ok=True) # exist_ok=True for debugging purposes                
 
                 # Save cutout
-                cv2.imwrite(str(square_folder / f"{square_label}.png") , square_cutout)
-                cv2.imwrite(str(square_folder / f"{square_label}_annotated.png"), square_cutout_annotated)
+                cv2.imwrite(str(square_dir / f"{square_label}.png") , square_cutout)
+                cv2.imwrite(str(square_dir / f"{square_label}_annotated.png"), square_cutout_annotated)
+
+        return squares_dir
 
 if __name__ == "__main__":
     import sys
