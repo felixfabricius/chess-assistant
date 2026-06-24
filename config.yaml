@@ -18,3 +18,9 @@ setup_folder:
 
 image_processing:
   size: 400
+
+vision:
+  model: LLM
+  prompt_version: 1
+  
+  

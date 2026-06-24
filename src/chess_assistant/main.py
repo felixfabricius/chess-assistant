@@ -1,8 +1,9 @@
 from pathlib import Path
+from omegaconf import OmegaConf
 
 from chess_assistant.setup import setup
 from chess_assistant.camera import capture_image
-from chess_assistant.vision import infer_fen_from_image
+from chess_assistant.vision import infer_fen_from_image, classify_squares
 from chess_assistant.image_processing import Processor
 
 
@@ -10,7 +11,33 @@ import json
 from datetime import datetime
 
 def main() -> None:
+    config = OmegaConf.load("config.yaml")
+
     setup_dir, pixel_coordinates = setup()
+    image_processor = Processor(setup_dir / "calibration_metadata.json", "config.yaml")
+
+    # Build game loop
+    i = 0
+    while True:
+        # Capture image from camera
+        image_dir = capture_image(setup_dir)
+        # Warp and cut out squares
+        warped_image_path = image_processor.warp(image_dir / "image.png")
+        image_processor.cutout(warped_image_path)
+
+        classify_squares(image_dir, config)
+        
+        # Classify individual squares
+            # provide the squares folder.
+            # for each square:
+                # call model; generate and store output in some json file
+        
+        # Infer board position
+        # Use all the predictions of the individual squares, to build board position
+        if i > 5:
+            break
+        i += 1
+
     image_dir = capture_image(setup_dir)
     print(f"Saved image to: {image_dir / "image.png"}")
 
