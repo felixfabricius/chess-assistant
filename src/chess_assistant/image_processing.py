@@ -31,7 +31,7 @@ class Processor:
 
         src = np.array(
             [
-                metadata["corners_px"][corner_square] 
+                metadata["actual_corners_px"][corner_square] 
                 for corner_square in 
                 [self.corner_map[square_position] for square_position in ["tl", "tr", "br", "bl"]]
             ],
@@ -119,8 +119,6 @@ class Processor:
             ],
             dtype=np.float32
         )
-        print(src, dst)
-        print((size_x, size_y))
         matrix = cv2.getPerspectiveTransform(src, dst)
         
         # Store attributes
@@ -131,9 +129,6 @@ class Processor:
 
     def warp(self, image_path: Path) -> Path:
         image = cv2.imread(image_path)
-        print(image.shape)
-        print(self.matrix)
-        print(self.image_size)
         warped_image = cv2.warpPerspective(image, self.matrix, self.image_size)
         warped_image_path = image_path.parent / (str(image_path.stem) + "_warped.png")
         cv2.imwrite(str(warped_image_path), warped_image)
@@ -243,7 +238,7 @@ class Processor:
         # Square size
         square_size = self.board_size // 8 # this should be multiple of 8 anyways
 
-        # Top left coordinates
+        # Top left coordinates of top-left square
         tl_y = self.padding["up"]
         tl_x = self.padding["left"]
 
@@ -266,13 +261,34 @@ class Processor:
                 # Cropping works using numpy slices.
                 # Axis 0: y, axis 1: x, axis 2: colours
                 square_cutout = warped_image[top:bottom, left:right]
-                if square_label == "a8":
-                    print("\n")
-                    print(f"tl_y: {tl_y}, tl_x: {tl_x}")
-                    print(f"top: {top}, bottom: {bottom}, left: {left}, right: {right}")
-                    print(warped_image.shape)
-                    print(square_cutout.shape)
-                    cv2.imshow("a8", square_cutout)
+                square_cutout_annotated = square_cutout.copy()
+
+                # Corners of the actual board square in the full warped image
+                square_left = tl_x + j * square_size
+                square_right = tl_x + (j + 1) * square_size
+                square_top = tl_y + i * square_size
+                square_bottom = tl_y + (i + 1) * square_size
+
+                # Convert global warped-image coordinates to local crop coordinates
+                # i.e. coordinates of the warped image
+                corners_global = [
+                    (square_left, square_top),
+                    (square_left, square_bottom),
+                    (square_right, square_bottom),
+                    (square_right, square_top),
+                ]
+
+                for x_global, y_global in corners_global:
+                    x_local = x_global - left
+                    y_local = y_global - top
+                    cv2.circle(
+                        square_cutout_annotated,
+                        (int(x_local), int(y_local)),
+                        6,
+                        (0, 0, 255),
+                        -1,
+                    )
+                
                 # Square path
                 # Folder structure will be:
                     # board setup (with raw.png and metadata)
@@ -285,6 +301,7 @@ class Processor:
 
                 # Save cutout
                 cv2.imwrite(str(square_folder / f"{square_label}.png") , square_cutout)
+                cv2.imwrite(str(square_folder / f"{square_label}_annotated.png"), square_cutout_annotated)
 
 if __name__ == "__main__":
     import sys
