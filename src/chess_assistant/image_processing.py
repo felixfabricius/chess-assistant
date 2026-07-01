@@ -4,6 +4,67 @@ import numpy as np
 from omegaconf import OmegaConf
 import json
 
+def letterbox(
+    img: np.ndarray,
+    target_size: tuple[int, int],
+    pad_value_img: int | float = 0,
+    pad_value_mask: int | float = 0,
+) -> np.ndarray:
+    """
+    Letterbox a 4-channel image to target size.
+
+    Args:
+        img: np.ndarray of shape (H, W, 4).
+             Channels 0:3 are image channels.
+             Channel 3 is a binary mask with values 0 or 1.
+        target_size: (target_h, target_w).
+        pad_value_img: padding value for image channels.
+        pad_value_mask: padding value for mask channel.
+
+    Returns:
+        np.ndarray of shape (target_h, target_w, 4).
+    """
+    if img.ndim != 3 or img.shape[2] != 4:
+        raise ValueError(f"Expected image shape (H, W, 4), got {img.shape}")
+
+    h, w = img.shape[:2]
+    target_h, target_w = target_size
+
+    scale = min(target_w / w, target_h / h)
+
+    new_w = int(round(w * scale))
+    new_h = int(round(h * scale))
+
+    # Split image and mask so we can resize them differently
+    image_channels = img[:, :, :3]
+    mask_channel = img[:, :, 3]
+
+    resized_image = cv2.resize(
+        image_channels,
+        (new_w, new_h),
+        interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR,
+    )
+
+    resized_mask = cv2.resize(
+        mask_channel,
+        (new_w, new_h),
+        interpolation=cv2.INTER_NEAREST,
+    )
+
+    # Create padded output
+    out = np.empty((target_h, target_w, 4), dtype=img.dtype)
+    out[:, :, :3] = pad_value_img
+    out[:, :, 3] = pad_value_mask
+
+    # Center the resized image
+    top = (target_h - new_h) // 2
+    left = (target_w - new_w) // 2
+
+    out[top:top + new_h, left:left + new_w, :3] = resized_image
+    out[top:top + new_h, left:left + new_w, 3] = resized_mask
+
+    return out
+
 class Processor:
     def __init__(self, metadata_path: Path, config_path: Path | None = None) -> None:
         """
@@ -14,10 +75,13 @@ class Processor:
         """
         # Get board size of transformed image (excl. padding) from config
         board_size = None
+        square_size = None
         if config_path:
             config = OmegaConf.load(config_path)
-            board_size = config.get("image_processing", OmegaConf.create()).get("size")
+            board_size = config.get("image_processing", OmegaConf.create()).get("board_size")
+            square_cutout_size = config.get("image_processing", OmegaConf.create()).get("square_cutout_size")
         board_size = board_size if board_size else 400
+        square_size = square_size if square_size else 144
         last_coordinate = board_size - 1
 
         # Load metadata
@@ -124,6 +188,7 @@ class Processor:
         # Store attributes
         self.padding = padding
         self.board_size = board_size
+        self.square_cutout_size = square_cutout_size
         self.image_size = (size_x, size_y)
         self.matrix = matrix
 
@@ -261,13 +326,35 @@ class Processor:
                 # Cropping works using numpy slices.
                 # Axis 0: y, axis 1: x, axis 2: colours
                 square_cutout = warped_image[top:bottom, left:right]
-                square_cutout_annotated = square_cutout.copy()
+
+                # Now I'm interested in top, bottom, left, right of the actual SQUARE,
+                # not the cutout, in the cutout image
+                square_left_cutout = self.padding["left"] 
+                    # this is pixel coordinate in x direction of the left edge of the square
+                    # in the cutout
+                    # where the square is located, depends just on the padding
+                square_right_cutout = self.padding["left"] + square_size
+                square_top_cutout = self.padding["up"]
+                square_bottom_cutout = self.padding["up"] + square_size + self.padding["down"]
+
+                 # Add a fourth masking channel
+                mask = np.zeros_like(square_cutout[:,:,0])
+                mask[square_top_cutout:square_bottom_cutout, square_left_cutout:square_right_cutout] = 1
+                square_cutout_masked = np.concatenate([square_cutout, np.expand_dims(mask, mask.ndim)], axis=2)
 
                 # Corners of the actual board square in the full warped image
                 square_left = tl_x + j * square_size
                 square_right = tl_x + (j + 1) * square_size
                 square_top = tl_y + i * square_size
                 square_bottom = tl_y + (i + 1) * square_size
+
+                # Letterbox pad the square cutout so it has size self.square_size x self.square_size
+                square_cutout_masked =letterbox(
+                    square_cutout_masked,
+                    (self.square_cutout_size, self.square_cutout_size)
+                )
+
+                square_cutout_annotated = square_cutout.copy()
 
                 # Convert global warped-image coordinates to local crop coordinates
                 # i.e. coordinates of the warped image
@@ -299,15 +386,37 @@ class Processor:
                 square_dir = squares_dir / square_label
                 square_dir.mkdir(exist_ok=True) # exist_ok=True for debugging purposes                
 
+                # Save metadata for square
+                square_metadata = {
+                    # Save pixel coordinates of top left of square within metadata
+                    # so model can learn e.g. that pieces further away from the camera appear larger
+                    "top": top,
+                    "left": left
+                }
+
                 # Save cutout
-                cv2.imwrite(str(square_dir / f"{square_label}.png") , square_cutout)
+                cv2.imwrite(str(square_dir / f"{square_label}.png") , square_cutout[:,:,:3])
                 cv2.imwrite(str(square_dir / f"{square_label}_annotated.png"), square_cutout_annotated)
+                # Save uncompressed numpy array which also contains the mask
+                square_cutout_masked[:, :, :3] = cv2.cvtColor(
+                    square_cutout_masked[:, :, :3],
+                    cv2.COLOR_BGR2RGB,
+                )
+                np.save(str(square_dir / f"{square_label}_masked.npy"), square_cutout_masked)
+
+                # Save square metadata
+                with open(square_dir / f"{square_label}_metadata.json", "w", encoding="utf-8") as f:
+                    json.dump(square_metadata, f, indent=2)
 
         return squares_dir
 
 if __name__ == "__main__":
     import sys
     assert len(sys.argv) == 4
+    # Example:
+    """
+    uv run python -m chess_assistant.image_processing data/raw_images/calibration_metadata.json config.yaml data/raw_images/raw.png
+    """
     # Pass the arguments that Processor class requires when initialised:
         # metadata_path
         # config_path

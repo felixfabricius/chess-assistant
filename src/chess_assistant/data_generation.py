@@ -115,6 +115,8 @@ def generate_data(
         images = [str(squares_dir / square / f"{square}.png") for square in SQUARES]
          # only if the "enable invalid position thing "
 
+        # For each square, also store its pixel coordinates of top left corner in the warped image path
+
 
         new_rows = pl.DataFrame(
             "square": SQUARES,

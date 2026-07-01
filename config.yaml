@@ -17,7 +17,8 @@ setup_folder:
   documentation_image: 2026/06/17_19:41
 
 image_processing:
-  size: 400
+  board_size: 400
+  square_cutout_size: 144
 
 vision:
   model: LLM
