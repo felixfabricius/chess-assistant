@@ -197,3 +197,60 @@ def test_new_game_resets_state(tmp_path):
     assert session.previous_board_fen is None
     assert session.move_uci is None
     assert session.board.fen() == chess.Board().fen()
+
+
+# -- recalibrate / new setup ------------------------------------------------
+
+
+def _patch_hardware(monkeypatch):
+    """Stub out the robot-facing calibrate/Processor so setup logic is testable."""
+    import chess_assistant.data_generation as dg
+
+    monkeypatch.setattr(dg, "calibrate", lambda setup_dir: {"stub": True})
+    monkeypatch.setattr(dg, "Processor", lambda *args, **kwargs: object())
+
+
+def test_recalibrate_keeps_position_by_default(tmp_path, monkeypatch):
+    session = _session(tmp_path)
+    # Put the board into an edited free-placement state.
+    session.toggle_mode()
+    session.place_piece("e4", "Q")
+    fen_before = session.board.fen()
+    assert session.valid_game_position is False
+
+    _patch_hardware(monkeypatch)
+    assert session.start_new_setup() is True
+
+    # A new setup exists, but the position and all its state are preserved.
+    assert session.setup_id is not None
+    assert session.processor is not None
+    assert session.board.fen() == fen_before
+    assert session.valid_game_position is False
+    assert session.legal_mode is False
+
+
+def test_recalibrate_reset_board_true_starts_fresh(tmp_path, monkeypatch):
+    session = _session(tmp_path)
+    session.toggle_mode()
+    session.place_piece("e4", "Q")
+
+    _patch_hardware(monkeypatch)
+    assert session.start_new_setup(reset_board=True) is True
+
+    assert session.board.fen() == chess.Board().fen()
+    assert session.valid_game_position is True
+    assert session.legal_mode is True
+
+
+def test_failed_calibration_does_not_change_board(tmp_path, monkeypatch):
+    import chess_assistant.data_generation as dg
+
+    session = _session(tmp_path)
+    session.apply_legal_move("e2", "e4")
+    fen_before = session.board.fen()
+
+    monkeypatch.setattr(dg, "calibrate", lambda setup_dir: None)  # aborted
+    assert session.start_new_setup() is False
+    # Nothing was reset or half-applied.
+    assert session.processor is None
+    assert session.board.fen() == fen_before

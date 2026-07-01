@@ -224,10 +224,15 @@ class DataGenerationSession:
 
     # -- setup / calibration ------------------------------------------------
 
-    def start_new_setup(self) -> bool:
+    def start_new_setup(self, reset_board: bool = False) -> bool:
         """Create a new setup dir, calibrate, and (re)initialise the Processor.
 
-        Resets the virtual board to a fresh game. Returns ``True`` on success.
+        The current virtual-board position and all its state
+        (``valid_game_position``, previous/current FEN, ``move_uci``,
+        legal/free mode) are **kept** by default, so you can recapture the same
+        position under a new setup to build robustness across setups. Pass
+        ``reset_board=True`` to start from a fresh game instead. Returns
+        ``True`` on success.
         """
         setup_id, setup_dir = create_setup(self.data_root)
 
@@ -258,7 +263,8 @@ class DataGenerationSession:
             },
         )
 
-        self.new_game()
+        if reset_board:
+            self.new_game()
         print(f"New setup ready: {setup_id}")
         return True
 
@@ -717,7 +723,7 @@ class BoardUI:
             self.selected = None
             self.spawn = None
             self.promotion = None
-            self.message = f"New setup {self.session.setup_id}."
+            self.message = f"New setup {self.session.setup_id} (position kept)."
         else:
             self.message = "Setup failed (see console). Press 'r' to retry."
 
