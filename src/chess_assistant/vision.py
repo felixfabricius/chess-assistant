@@ -11,6 +11,8 @@ import anthropic
 
 from omegaconf import OmegaConf, DictConfig
 
+from chess_assistant.config import SQUARES
+
 load_dotenv()
 
 PROMPTS = {
@@ -33,10 +35,6 @@ PROMPTS = {
         "Return nothing but this label."
     )
 }
-
-FILES = ["a", "b", "c", "d", "e", "f", "g", "h"]
-RANKS = [str(i) for i in range(1, 9)]
-SQUARES = [file + rank for file in FILES for rank in RANKS]
 
 @dataclass
 class SquareEstimation:
@@ -126,7 +124,7 @@ class BoardEstimator:
         if self.model == "LLM":
             self.client = anthropic.Anthropic()
     
-    def classify_square(self, image_path: Path) -> SquareEstimation: 
+    def estimate_square(self, image_path: Path) -> SquareEstimation: 
         if self.model == "LLM":
             image_path = image_path.parent / (image_path.stem + "_annotated" + image_path.suffix)
             print(image_path) 
@@ -167,7 +165,7 @@ class BoardEstimator:
         else:
             raise NotImplementedError
 
-    def classify_board(self, squares_dir):
+    def estimate_board(self, squares_dir):
         """
         Declar new BoardEstimation object.
         For each square:
@@ -206,7 +204,7 @@ class BoardEstimator:
                 # Like pixel position of square, and some metadata about the robot position?
                 # (I think this is particularly relevant for our own model, which might be able to learn )
                 # valuable things from this.
-                square_estimation = self.classify_square(image_path)
+                square_estimation = self.estimate_square(image_path)
                 print(f"square estimation:\n{square_estimation}\n\n")
                 setattr(self.board_estimation, square, square_estimation)
 

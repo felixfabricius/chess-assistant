@@ -200,16 +200,6 @@ def calibrate(setup_dir: Path = Path("data") / "raw_images") -> dict | None:
                     "camera_natural_orientation": infer_camera_natural_corner_order(actual_corners_px),
                     "extended_corner_order": ["a1", "a8", "h8", "h1"],
                     "extended_corners_px": extended_corners_px,
-                    "warp_convention": {
-                        "a8": [0, 0],
-                        "h8": ["board_size_px", 0],
-                        "h1": ["board_size_px", "board_size_px"],
-                        "a1": [0, "board_size_px"],
-                    },
-                    "notes": (
-                        "Actual corners define the chessboard grid. "
-                        "Extended corners define a padded region for later crop/padding estimation."
-                    ),
                     "raw_image_path": str(raw_image_path),
                 }
 
@@ -364,16 +354,6 @@ def annotate_existing(image_path: Path) -> dict | None:
         "camera_natural_orientation": infer_camera_natural_corner_order(actual_corners_px),
         "extended_corner_order": ["a1", "a8", "h8", "h1"],
         "extended_corners_px": extended_corners_px,
-        "warp_convention": {
-            "a8": [0, 0],
-            "h8": ["board_size_px", 0],
-            "h1": ["board_size_px", "board_size_px"],
-            "a1": [0, "board_size_px"],
-        },
-        "notes": (
-            "Actual corners define the chessboard grid. "
-            "Extended corners define a padded region for later crop/padding estimation."
-        ),
         "raw_image_path": str(image_path),
     }
 
