@@ -1,9 +1,13 @@
 import json
+import yaml
 import polars as pl
 from pathlib import Path
 from datetime import datetime
 
 from chess_assistant.calibration import calibrate
+from chess_assistant.camera import capture_image
+from chess_assistant.image_processing import Processor
+from chess_assistant.config import SQUARES, PIECES
 
 # Files we need
 
@@ -15,10 +19,14 @@ def hash_setup(setup: dict[str, float]) -> str:
 
 def generate_data(
     setups_path: Path = "data/setups.json",
-    csv_path: Path = "data/data.csv"
+    csv_path: Path = "data/data.csv",
+    config_path: Path = "config.yaml"
 ):
     with open(setups_path, "r", encoding="utf-8") as f:
         setups = json.load(f)
+
+    #with open(config_path, "r", encoding="utf-8") as f:
+    #    config = yaml.safe_load(f)
 
     data = pl.read_csv(csv_path)
 
@@ -63,8 +71,59 @@ def generate_data(
             # TODO; in this case, something went wrong. Perhaps need to try again.
             raise NotImplementedError
 
+        valid_position = True # set to false as soon as we allow non-valid position even once
+        # for a given set-up
 
-        # 
+        # For a given set-up, initialise processor
+        # When initialising, using the pixel coordinates in the calibration metadata, 
+        # this infers how to warp the chessboard image, and how to pad. 
+        # from then on, can use its warp and cutout methods to obtain individual square cutouts of warped image
+        
+        # Needs to be reinitialised with new calibration_metadata if setup changes
+        image_processor = Processor(calibration_metadata_path, config_path)
+
+        # When capturing an image:
+        # This saves all the square cutouts
+        image_dir = capture_image(setup_dir)
+
+        # Add metadata here:
+        image_metadata = {
+            "valid_position": valid_position,
+            "board_fen": None,# fen if valid position, else only the part that is linked to position; TODO
+            "previous_fen": None # previous fen if valid position
+        }
+
+        warped_image_path = image_processor.warp(image_dir / "image.png")
+        squares_dir = image_processor.cutout(warped_image_path)
+
+        # How does this need to be modified? / what needs to be added: labels
+
+        # Only capture an image when we've updated the chess-position
+        # is it sufficient to store the label in the master csv, or also add it to each
+        # individual squares directory?
+            # maybe for robustness add to each individual squares directory, but for simplicity
+            # let's not do that right now
+        
+        # For each image, create a bunch of new rows and add them to our dataframe
+
+        # Need 64 new rows for each square; and then need to link to the square cutout
+        # need to access the label! need a function which uses our chessboard representation to 
+        # access figure that is on a given square 
+        # need to 
+
+        labels = [piece_at(square) for square in SQUARES] # TODO; piece_at
+        images = [str(squares_dir / square / f"{square}.png") for square in SQUARES]
+         # only if the "enable invalid position thing "
+
+
+        new_rows = pl.DataFrame(
+            "square": SQUARES,
+            "label": labels,
+            "image": images,
+            "calibration_metadata_path": calibration_metadata_path,
+            "valid_position": valid_position,
+            ""
+        )
 
 
 if __name__ == "__main__":
