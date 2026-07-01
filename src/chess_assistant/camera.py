@@ -22,6 +22,10 @@ def capture_image(output_dir: Path) -> Path:
     with ReachyMini(media_backend="default") as mini:
         frame = mini.media.get_frame()
 
-    cv2.imwrite(str(image_path), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+    # get_frame() already returns a BGR array (calibration.py saves it directly
+    # and those images are correctly coloured; the previous cvtColor(RGB2BGR)
+    # here produced blue/red-swapped images that propagated to every cutout).
+    # cv2.imwrite expects BGR, so write the frame as-is.
+    cv2.imwrite(str(image_path), frame)
 
     return image_dir

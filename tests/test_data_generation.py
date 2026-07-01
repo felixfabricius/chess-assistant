@@ -1,0 +1,199 @@
+"""Unit tests for the pure helpers and state logic in ``data_generation``.
+
+These deliberately avoid the pygame GUI and the robot capture pipeline, which
+require a display / hardware. Everything tested here is import-light.
+"""
+
+import csv
+
+import chess
+import pytest
+
+from chess_assistant.config import SQUARES
+from chess_assistant.data_generation import (
+    CSV_COLUMNS,
+    DataGenerationSession,
+    append_rows_to_csv,
+    board_to_piece_map,
+    build_square_rows,
+    create_setup,
+    piece_label_at,
+    square_annotated_image_path,
+    square_image_path,
+)
+
+
+# -- labels -----------------------------------------------------------------
+
+
+def test_piece_label_at_starting_position():
+    board = chess.Board()
+    assert piece_label_at(board, "e1") == "K"
+    assert piece_label_at(board, "e8") == "k"
+    assert piece_label_at(board, "a1") == "R"
+    assert piece_label_at(board, "a7") == "p"
+    assert piece_label_at(board, "e4") == "empty"
+
+
+def test_board_to_piece_map_covers_all_squares():
+    board = chess.Board()
+    piece_map = board_to_piece_map(board)
+    assert len(piece_map) == 64
+    assert set(piece_map) == set(SQUARES)
+    # 32 pieces at the start, 32 empty squares.
+    assert sum(1 for label in piece_map.values() if label != "empty") == 32
+    assert piece_map["e2"] == "P"
+    assert piece_map["d7"] == "p"
+
+
+# -- paths ------------------------------------------------------------------
+
+
+def test_square_image_paths_are_nested_correctly(tmp_path):
+    squares_dir = tmp_path / "squares"
+    assert square_image_path(squares_dir, "e4") == squares_dir / "e4" / "e4.png"
+    assert (
+        square_annotated_image_path(squares_dir, "e4")
+        == squares_dir / "e4" / "e4_annotated.png"
+    )
+
+
+# -- row building -----------------------------------------------------------
+
+
+def test_build_square_rows_shape_and_labels(tmp_path):
+    board = chess.Board()
+    piece_map = board_to_piece_map(board)
+    squares_dir = tmp_path / "squares"
+    rows = build_square_rows(
+        setup_id="setup1",
+        image_id="board_x",
+        squares_dir=squares_dir,
+        full_image_path=tmp_path / "image.png",
+        calibration_metadata_path=tmp_path / "calibration_metadata.json",
+        piece_map=piece_map,
+        valid_game_position=True,
+        board_fen=board.fen(),
+        previous_board_fen=None,
+        move_uci=None,
+        created_at="2026-07-01T10:00:00",
+    )
+    assert len(rows) == 64
+    assert list(rows[0].keys()) == CSV_COLUMNS
+
+    by_square = {row["square"]: row for row in rows}
+    assert by_square["e1"]["label"] == "K"
+    assert by_square["e4"]["label"] == "empty"
+    assert by_square["e1"]["square_image_path"] == str(
+        squares_dir / "e1" / "e1.png"
+    )
+    # None values are serialised as empty strings for the CSV.
+    assert by_square["e1"]["previous_board_fen"] == ""
+    assert by_square["e1"]["move_uci"] == ""
+
+
+# -- CSV append -------------------------------------------------------------
+
+
+def test_append_rows_writes_header_once_and_appends(tmp_path):
+    csv_path = tmp_path / "nested" / "data.csv"
+    row = {col: "x" for col in CSV_COLUMNS}
+
+    append_rows_to_csv(csv_path, [row, row])
+    append_rows_to_csv(csv_path, [row])
+
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        reader = list(csv.reader(f))
+    # 1 header + 3 data rows, header only once.
+    assert reader[0] == CSV_COLUMNS
+    assert len(reader) == 4
+    assert all(line[0] != "setup_id" for line in reader[1:])
+
+
+# -- setup dir --------------------------------------------------------------
+
+
+def test_create_setup_makes_dir_with_given_timestamp(tmp_path):
+    setup_id, setup_dir = create_setup(tmp_path, timestamp="2026-07-01_120000")
+    assert setup_id == "2026-07-01_120000"
+    assert setup_dir == tmp_path / "2026-07-01_120000"
+    assert setup_dir.is_dir()
+
+
+# -- legal-move mode --------------------------------------------------------
+
+
+def _session(tmp_path):
+    return DataGenerationSession(config_path="config.yaml", data_root=tmp_path)
+
+
+def test_legal_move_tracks_fens(tmp_path):
+    session = _session(tmp_path)
+    start_fen = session.board.fen()
+    result = session.apply_legal_move("e2", "e4")
+    assert result == "ok"
+    assert session.previous_board_fen == start_fen
+    assert session.board_fen != start_fen
+    assert session.move_uci == "e2e4"
+    assert session.valid_game_position is True
+
+
+def test_illegal_move_rejected(tmp_path):
+    session = _session(tmp_path)
+    assert session.apply_legal_move("e2", "e5") == "illegal"
+    assert session.move_uci is None
+
+
+def test_promotion_requires_explicit_choice(tmp_path):
+    session = _session(tmp_path)
+    session.board = chess.Board("4k3/P7/8/8/8/8/8/4K3 w - - 0 1")
+    # Without a promotion piece the move must not silently default to queen.
+    assert session.apply_legal_move("a7", "a8") == "need_promotion"
+    assert session.move_uci is None
+    # With an explicit choice it applies.
+    assert session.apply_legal_move("a7", "a8", promotion=chess.KNIGHT) == "ok"
+    assert session.move_uci == "a7a8n"
+
+
+# -- free-placement mode ----------------------------------------------------
+
+
+def test_place_piece_sets_invalid_and_labels(tmp_path):
+    session = _session(tmp_path)
+    session.toggle_mode()
+    assert session.legal_mode is False
+    session.place_piece("e4", "Q")
+    assert session.valid_game_position is False
+    assert piece_label_at(session.board, "e4") == "Q"
+    assert board_to_piece_map(session.board)["e4"] == "Q"
+
+
+def test_remove_piece_clears_square(tmp_path):
+    session = _session(tmp_path)
+    session.toggle_mode()
+    session.remove_piece("e2")
+    assert piece_label_at(session.board, "e2") == "empty"
+    assert session.valid_game_position is False
+
+
+def test_move_piece_free_ignores_legality(tmp_path):
+    session = _session(tmp_path)
+    session.toggle_mode()
+    assert session.move_piece_free("a1", "d4") is True
+    assert piece_label_at(session.board, "d4") == "R"
+    assert piece_label_at(session.board, "a1") == "empty"
+    assert session.valid_game_position is False
+    # Moving from an empty square returns False.
+    assert session.move_piece_free("a1", "e5") is False
+
+
+def test_new_game_resets_state(tmp_path):
+    session = _session(tmp_path)
+    session.toggle_mode()
+    session.place_piece("e4", "Q")
+    session.new_game()
+    assert session.legal_mode is True
+    assert session.valid_game_position is True
+    assert session.previous_board_fen is None
+    assert session.move_uci is None
+    assert session.board.fen() == chess.Board().fen()

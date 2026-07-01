@@ -11,9 +11,15 @@ dependencies = [
     "numpy>=2.4.6",
     "omegaconf>=2.3.1",
     "opencv-python>=4.13.0.92",
+    "pygame>=2.6.0",
     "python-chess>=1.999",
     "python-dotenv>=1.2.2",
     "reachy-mini[mujoco]>=1.7.3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
 ]
 
 [build-system]
