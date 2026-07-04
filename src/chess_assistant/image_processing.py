@@ -75,13 +75,13 @@ class Processor:
         """
         # Get board size of transformed image (excl. padding) from config
         board_size = None
-        square_size = None
+        square_cutout_size = None
         if config_path:
             config = OmegaConf.load(config_path)
             board_size = config.get("image_processing", OmegaConf.create()).get("board_size")
             square_cutout_size = config.get("image_processing", OmegaConf.create()).get("square_cutout_size")
         board_size = board_size if board_size else 400
-        square_size = square_size if square_size else 144
+        square_cutout_size = square_cutout_size if square_cutout_size else 144
         last_coordinate = board_size - 1
 
         # Load metadata

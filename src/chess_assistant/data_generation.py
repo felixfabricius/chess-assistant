@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import csv
 import json
+import random
 from datetime import datetime
 from pathlib import Path
 
@@ -123,6 +124,7 @@ def square_annotated_image_path(squares_dir: Path, square: str) -> Path:
 def build_square_rows(
     *,
     setup_id: str,
+    setup_split: str,
     image_id: str,
     squares_dir: Path,
     full_image_path: Path,
@@ -141,6 +143,7 @@ def build_square_rows(
         rows.append(
             {
                 "setup_id": setup_id,
+                "setup_split": setup_split,
                 "image_id": image_id,
                 "square": square,
                 "label": piece_map[square],
@@ -185,7 +188,8 @@ def create_setup(data_root: Path, timestamp: str | None = None) -> tuple[str, Pa
     setup_id = timestamp or now_stamp()
     setup_dir = Path(data_root) / setup_id
     setup_dir.mkdir(parents=True, exist_ok=True)
-    return setup_id, setup_dir
+    setup_split = random.choices(["train", "val", "test"], [0.6, 0.2, 0.2])
+    return setup_id, setup_dir, setup_split
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +213,7 @@ class DataGenerationSession:
         # Set once a setup has been calibrated.
         self.setup_id: str | None = None
         self.setup_dir: Path | None = None
+        self.setup_split: str | None = None
         self.calibration_metadata_path: Path | None = None
         self.processor: Processor | None = None
 
@@ -234,7 +239,7 @@ class DataGenerationSession:
         ``reset_board=True`` to start from a fresh game instead. Returns
         ``True`` on success.
         """
-        setup_id, setup_dir = create_setup(self.data_root)
+        setup_id, setup_dir, setup_split = create_setup(self.data_root)
 
         calibration_data = calibrate(setup_dir)
         if not calibration_data:
@@ -250,6 +255,7 @@ class DataGenerationSession:
 
         self.setup_id = setup_id
         self.setup_dir = setup_dir
+        self.setup_split = setup_split
         self.calibration_metadata_path = calibration_metadata_path
         self.processor = processor
 
@@ -418,6 +424,7 @@ class DataGenerationSession:
         # 4. Append the 64 CSV rows (built first, then written in one go).
         rows = build_square_rows(
             setup_id=self.setup_id,
+            setup_split=self.setup_split,
             image_id=image_id,
             squares_dir=squares_dir,
             full_image_path=full_image_path,
@@ -436,6 +443,7 @@ class DataGenerationSession:
             image_dir / "metadata.json",
             {
                 "setup_id": self.setup_id,
+                "setup_split": self.setup_split,
                 "image_id": image_id,
                 "created_at": created_at,
                 "valid_game_position": self.valid_game_position,
