@@ -56,7 +56,7 @@ class SquareClassifier(nn.Module):
 
         ### Preprocessing of additional info: small MLP
         self.mlp_1 = nn.Sequential(
-            nn.Linear(14, 16),
+            nn.Linear(10, 16),
             self.relu
         )
 
@@ -73,13 +73,15 @@ class SquareClassifier(nn.Module):
         image_features = self.image_feature_extraction(image)
         image_features = torch.cat(
             [
-                torch.flatten(nn.MaxPool2d(16)(image_features)),
-                torch.flatten(nn.AvgPool2d(16)(image_features))
+                torch.flatten(nn.MaxPool2d(16)(image_features), start_dim=1), # want to maintain batch structure
+                torch.flatten(nn.AvgPool2d(16)(image_features), start_dim=1)
             ],
-            dim=0
+            dim=1
         )
-        metadata_features = self.mlp_2(metadata)
-        mlp_input = torch.cat([image_features, metadata_features])
+        metadata_features = self.mlp_1(metadata)
+        print(image_features.shape)
+        print(metadata_features.shape)
+        mlp_input = torch.cat([image_features, metadata_features], dim=1)
         logits = self.mlp_2(mlp_input)
         return logits
 

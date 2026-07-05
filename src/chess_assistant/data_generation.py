@@ -43,6 +43,7 @@ CSV_NAME = "data.csv"
 # appended to over many sessions without ever changing column order.
 CSV_COLUMNS: list[str] = [
     "setup_id",
+    "setup_split",
     "image_id",
     "square",
     "label",
@@ -188,7 +189,7 @@ def create_setup(data_root: Path, timestamp: str | None = None) -> tuple[str, Pa
     setup_id = timestamp or now_stamp()
     setup_dir = Path(data_root) / setup_id
     setup_dir.mkdir(parents=True, exist_ok=True)
-    setup_split = random.choices(["train", "val", "test"], [0.6, 0.2, 0.2])
+    setup_split = random.choices(["train", "val", "test"], [0.6, 0.2, 0.2])[0]
     return setup_id, setup_dir, setup_split
 
 

@@ -1,16 +1,7 @@
-import torch
-from torch.utils.data import Dataset, DataLoader
-
-from chess_assistant.model.model import SquareClassifier
-
-def train():
-    model = SquareClassifier()
-    
-    train_dataloader = # TODO
-    
-
-    # Load dataset
-    return None 
-
-if __name__ == "__main__":
-    train()
+def train(model, dataloader, loss_fn, optimizer):
+    for batch, (X, metadata, labels) in enumerate(dataloader):
+        preds = model(X, metadata) # shape: (batch_size, 13)
+        loss = loss_fn(preds, labels)
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()

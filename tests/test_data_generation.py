@@ -67,6 +67,7 @@ def test_build_square_rows_shape_and_labels(tmp_path):
     squares_dir = tmp_path / "squares"
     rows = build_square_rows(
         setup_id="setup1",
+        setup_split="train",
         image_id="board_x",
         squares_dir=squares_dir,
         full_image_path=tmp_path / "image.png",
@@ -114,10 +115,11 @@ def test_append_rows_writes_header_once_and_appends(tmp_path):
 
 
 def test_create_setup_makes_dir_with_given_timestamp(tmp_path):
-    setup_id, setup_dir = create_setup(tmp_path, timestamp="2026-07-01_120000")
+    setup_id, setup_dir, setup_split = create_setup(tmp_path, timestamp="2026-07-01_120000")
     assert setup_id == "2026-07-01_120000"
     assert setup_dir == tmp_path / "2026-07-01_120000"
     assert setup_dir.is_dir()
+    assert setup_split in ["train", "val", "test"]
 
 
 # -- legal-move mode --------------------------------------------------------

@@ -4,4 +4,4 @@ TARGET_MAP = {piece: label for label, piece in enumerate([
     "k", "q", "r", "b", "n", "p"
 ])}
 
-INVERSE_TARGET_MAP = {label: piece for piece, label in TARGET_MAP.values()}
+INVERSE_TARGET_MAP = {label: piece for piece, label in TARGET_MAP.items()}
