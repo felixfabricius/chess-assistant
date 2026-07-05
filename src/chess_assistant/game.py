@@ -10,22 +10,25 @@ class ChessGame:
     Perhaps also keep track of multiple moves. 
     (Easier to debug: if it's not a specific move that I think it is, can try a new one.)
     """
-    def __init__(self):
-        self.board = chess.Board()
+    def __init__(self, fen: str | None = None, model_type: str = "LLM"):
+        self.board = chess.Board(fen=fen) 
+            # allow for passing of FEN to simulate continuation of game from an 
+            # arbitrary prior position during evaluation
+        assert model_type in ["LLM", "CNN"]
+        self.model_type = model_type
     
     def fen(self):
         return self.board.fen()
 
-    def estimate_move(self, board_estimation):
-        # board_estimation object has 64 fields (a1, ...)
-        # each of those fields is a square estimation object:
+    def estimate_move(self, board_estimate):
+        # board_estimate object has 64 fields (a1, ...)
+        # each of those fields is a square estimate object:
             # which has some metadata fields
             # and then also K, Q, ... along with floats for confidence.
         # This should allow me to access the predictions I need.
         # Score: Mean Absolute Error? Or Mean Squared Error?
         # I think mean squared error makes sense. 
         # Task becomes: for each move, calculate Mean Squared error, then sort by MSE.
-        side_to_move = "white" if self.fen().split()[1] == "w" else "black"
 
         """
         Note that this initial score does not even matter! 
@@ -41,9 +44,9 @@ class ChessGame:
                     (piece == "empty" and piece_at_square is None)
                     or piece == piece_at_square
                 ):
-                    initial_loss += (1 - getattr(board_estimation, f"{square}.{piece}")) ** 2
+                    initial_loss += (1 - getattr(board_estimate, f"{square}.{piece}")) ** 2
                 else:
-                    initial_loss += getattr(board_estimation, f"{square}.{piece}") ** 2
+                    initial_loss += getattr(board_estimate, f"{square}.{piece}") ** 2
             
             # QUESTION: do I also want to take predictions for other pieces into account?
             # E.g. 3 pieces. if i have 
@@ -51,7 +54,7 @@ class ChessGame:
                 # B: 0.4, 0.4, 0.2
             # This second way (real MSE?) the score for the third piece would be lower with B.
             # Perhaps check out some common classification losses here.
-            # Then access the prediction in board_estimation for that piece
+            # Then access the prediction in board_estimate for that piece
             # And add squared deviation to initial_score
 
         scored_moves = {}
@@ -72,7 +75,7 @@ class ChessGame:
                 - Promotion capture still works for the destination square, 
                   but the captured piece disappears from square_to.
             
-            Could slightly increase speed of this by providing manual code for these edge cases
+            # TODO: Could slightly increase speed of this by providing manual code for these edge cases
             -> we don't always loop through all 64 squares for every move.
             """
             for square in chess.SQUARES:
@@ -95,23 +98,23 @@ class ChessGame:
                 1) remove the earlier contribution from old piece and new piece,
                 2) add the new contribution from old piece and new piece.
                 
-                score += (1 - getattr(board_estimation, f"{square}.{new_piece}")) ** 2
-                score -= (1 - getattr(board_estimation, f"{square}.{old_piece}")) ** 2
+                score += (1 - getattr(board_estimate, f"{square}.{new_piece}")) ** 2
+                score -= (1 - getattr(board_estimate, f"{square}.{old_piece}")) ** 2
 
-                score -= getattr(board_estimation, f"{square}.{new_piece}") ** 2
-                score += getattr(board_estimation, f"{square}.{old_piece}") ** 2
+                score -= getattr(board_estimate, f"{square}.{new_piece}") ** 2
+                score += getattr(board_estimate, f"{square}.{old_piece}") ** 2
                 
                 So for new piece, we add (1 - x) ** 2 - x ** 2 = -2x + 1
                 For old piece, we subtract -2x + 1
                 """
-                loss_increment += -2 * getattr(board_estimation, f"{square}.{new_piece}") + 1
-                loss_increment += 2 * getattr(board_estimation, f"{square}.{old_piece}") - 1
+                loss_increment += -2 * getattr(board_estimate, f"{square}.{new_piece}") + 1
+                loss_increment += 2 * getattr(board_estimate, f"{square}.{old_piece}") - 1
             
             scored_moves[move.uci()] = loss_increment
         
         # Sort candiate moves by likelihood (descending), which means
         # sort in ascending order by error impact of candidate moves
-        return [move for move in sorted(scored_moves.values(), key=lambda x : x[1])]
+        return [move for move in sorted(scored_moves.items(), key=lambda x: x[1])]
 
     def apply_move(self, move_uci):
         move = chess.Move.from_uci(move_uci)

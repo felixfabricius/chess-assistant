@@ -14,15 +14,18 @@ def train(config_path: Path = "src/chess_assistant/model/config.yaml"):
     model = SquareClassifier()    
     train_dataloader = create_dataloader(
         split="train",
-        batch_size=config.get("batch_size", 64)
+        batch_size=config.get("batch_size", 64),
+        shuffle=True
     )
+
+    val_dataloader = create_dataloader("val", 64, False)
 
     # Hyperparameters
     lr = config.optimizer.lr
     weight_decay = config.optimizer.get("weight_decay", 1e-4)
 
     # Loss and optimizer
-    loss = nn.CrossEntropyLoss()
+    loss_fn = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=lr,
@@ -31,8 +34,9 @@ def train(config_path: Path = "src/chess_assistant/model/config.yaml"):
 
     epochs = config.get("epochs", 1)
     for epoch in epochs:
-        train(model, train_dataloader, loss, optimizer)
-        
+        train(model, train_dataloader, loss_fn, optimizer)
+        evaluate(model, val_dataloader, loss_fn)
+
 
     # Load dataset
     return None 

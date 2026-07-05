@@ -20,6 +20,7 @@ class squareDataset(Dataset):
         if split not in ["train", "val", "test"]:
             raise ValueError(f"Split must be of type train, val or test. Got {split}.")
         self.data = pl.read_csv(csv_path).filter(pl.col("setup_split").eq(split))
+        self.split = split
         self.transform = transform
         self.target_transform = target_transform
 
@@ -79,12 +80,23 @@ class squareDataset(Dataset):
             ])
         metadata = torch.tensor(metadata, dtype=torch.float32)
         
+        if self.split == "train":
+            return image, metadata, label
 
-        return image, metadata, label
+        # Else: also want image_id (to test if equal for all); valid_game_position; previous_board_fen; board_fen; move_uci
+        # Issue with the dataloader approach to "randomly" get just images from one board position in one batch
+        # As soon as just one row is removed from the CSV, this might no longer work
+        # Alternative approach: load data.csv; then get some mask for the 
+        # valid game positions in the current split;
+        # Then for each of those board positions, perhaps call BoardEstimator with estimate_board.
+        # (we already have the square_dir)
+        # Perhaps need to reinitialise each each time with the previous FEN.
+        # I think this second approach is neater!
 
 
 def create_dataloader(
     split: str,
+    shuffle: bool = False,
     batch_size: int = 64,
     transform = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)]),
     target_transform = TARGET_MAP.__getitem__,
@@ -100,6 +112,6 @@ def create_dataloader(
 
     )
 
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
     return dataloader

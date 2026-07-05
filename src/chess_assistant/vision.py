@@ -4,14 +4,20 @@ This should be testable. (And ideally I also store outputs of this, so I can lat
 my own training.)
 """
 import base64
+import json
 from pathlib import Path
 from dotenv import load_dotenv
 from dataclasses import dataclass, make_dataclass
 import anthropic
+import torch
+from torchvision.transforms import v2
+import numpy as np
+
 
 from omegaconf import OmegaConf, DictConfig
 
 from chess_assistant.config import SQUARES
+from chess_assistant.model.config import INVERSE_TARGET_MAP
 
 load_dotenv()
 
@@ -37,7 +43,7 @@ PROMPTS = {
 }
 
 @dataclass
-class SquareEstimation:
+class SquareEstimate:
     image_path: Path | None = None
     copied: bool = False
     copied_from: Path | None = None
@@ -55,9 +61,9 @@ class SquareEstimation:
     p: float = 0
     empty: float = 0
 
-BoardEstimation = make_dataclass(
-    "BoardEstimation",
-    [(square, SquareEstimation | None, None) for square in SQUARES]
+BoardEstimate = make_dataclass(
+    "BoardEstimate",
+    [(square, SquareEstimate | None, None) for square in SQUARES]
 )
 
 def encode_image_base64(image_path: Path) -> str:
@@ -101,31 +107,44 @@ def infer_fen_from_image(image_path: Path, model: str = "claude-opus-4-8", promp
     return message.content[0].text
 
 class BoardEstimator:
-    def __init__(self, config: DictConfig):
+    def __init__(self, model_type: str = "CNN", config: DictConfig | None = None, calibration_metadata_path: Path | None = None, model = None):
         """
         Keep track of:
-        - recent board estimation
+        - recent board estimate
         - 
 
         To use:
         - iterate over each of the squares
 
-        - look at fields of square in recent board estimation:
+        - look at fields of square in recent board estimate:
           - image path -> load image; could perhaps also store the array in memory right away? - though this could get quite large.
             then compare this to image for the current piece (accessible via squares_folder)
-            copy estimations over if they match
+            copy estimates over if they match
             
           - 
         """
-        self.board_estimation = BoardEstimation()
-        self.model = config.vision.get("model", "LLM")
-        self.model_version = config.vision.get("model_version", "claude-opus-4-8")
-        self.prompt_version = config.vision.get("prompt_version", 1)
-        if self.model == "LLM":
+        assert model_type in ["CNN", "LLM"]
+        self.board_estimate = BoardEstimate()
+        if model_type == "LLM":
+            assert config is not None
+            self.model_version = config.vision.get("model_version", "claude-opus-4-8")
+            self.prompt_version = config.vision.get("prompt_version", 1)
             self.client = anthropic.Anthropic()
-    
-    def estimate_square(self, image_path: Path) -> SquareEstimation: 
-        if self.model == "LLM":
+        else:
+            assert calibration_metadata_path is not None
+            assert model is not None
+            with open(calibration_metadata_path, "r") as f:
+                calibration_metadata = json.load(calibration_metadata_path)
+            self.calibration_metadata = [
+                px_coordinate 
+                for corner in ["a1", "a8", "h8", "h1"] 
+                for px_coordinate in calibration_metadata["actual_corners_px"][corner]
+            ]
+            self.model = model
+        self.model_type = model_type
+
+    def estimate_square(self, image_path: Path) -> SquareEstimate: 
+        if self.model_type == "LLM":
             image_path = image_path.parent / (image_path.stem + "_annotated" + image_path.suffix)
             print(image_path) 
             message = self.client.messages.create(
@@ -149,29 +168,68 @@ class BoardEstimator:
                 ]
             )
             breakpoint()
-            square_estimation = SquareEstimation(
+            square_estimate = SquareEstimate(
                 image_path=image_path,
                 copied=False,
-                copied_from="None"
+                copied_from=None
             )
             print(message.content[0].text)
             try:
-                setattr(square_estimation, message.content[0].text, 1.)
+                setattr(square_estimate, message.content[0].text, 1.)
             except Exception as e:
                 print(e)
 
-            return square_estimation
+            return square_estimate
 
         else:
-            raise NotImplementedError
+            square = image_path.stem # TODO: this might be brittle if I change conventions;
+            # and e.g. image_path is no longer .../{square}.png
+            square_dir = image_path.parent
+            setup_dir = square_dir.parent.parent.parent
+
+            # For the metadata:
+            metadata = []
+            with open(square_dir / f"{square}_metadata.json", "r") as f:
+                square_metadata = json.load(f)
+            metadata.extend([square_metadata[key] for key in ["top", "left"]])
+            metadata.extend(self.calibration_metadata)
+            metadata = torch.tensor(metadata, dtype=torch.float32).unsqueeze() # unsqueeze to add batch dimension; TODO: check if necessary
+            assert metadata.shape == (1, 10)
+            # TODO: make this more efficient. Perhaps no need to load the setup metadata
+            # so often. Can perhaps save this in the board estimator class.
+
+            # For the image
+            image = np.load(square_dir / f"{square}_masked.npy")
+            rgb = image[..., :3]
+            transformed_rgb = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)])(rgb)
+            mask = torch.tensor(image[..., 3], dtype=torch.float32)
+            image = torch.cat([transformed_rgb, mask.unsqueeze()]).unsqueeze()
+            assert image.shape == (1, 4, 144, 144)
+            
+            logits = self.model(image, metadata).squeeze()
+            # Shape of the logits will be (1, 13)
+
+            # Now turn the logits into the square prediction;
+            # Perhaps just maintain the raw logits?
+            square_estimate = SquareEstimate(
+                image_path=image_path,
+                copied=False,
+                copied_from=None
+            )
+
+            for label in INVERSE_TARGET_MAP.keys():
+                # label takes values in 0, ..., 12
+                setattr(square_estimate, INVERSE_TARGET_MAP[label], logits[label])
+
+            return square_estimate
 
     def estimate_board(self, squares_dir):
         """
-        Declar new BoardEstimation object.
+        Declar new BoardEstimate object.
         For each square:
             - check if image has changed relative to the last image (see recent_board.square.image_path) to compare
             - if no:
-                - then create a copy.deepcopy of estimations for that square & modify the copied_from 
+                - then create a copy.deepcopy of estimates for that square & modify the copied_from 
                   (Maybe we don't even need a copy.deepcopy because it's okay if we overwrite?)
                   I think that's quite plausiblel actually
             - if yes:
@@ -180,7 +238,7 @@ class BoardEstimator:
         for square in SQUARES:
             image_path = squares_dir / square / f"{square}.png"
             if (
-                getattr(self.board_estimation, square) # these are initialised as None
+                getattr(self.board_estimate, square) # these are initialised as None
                 and 1 == 2 # TODO # check similarity between images:
             ):            
                 # Copy over
@@ -189,26 +247,26 @@ class BoardEstimator:
                 # So maybe no need to pretend we have two separate objects here?
                 # Just use self.board for everything?
                 setattr(
-                    self.board_estimation, f"{square}.copied_from",
+                    self.board_estimate, f"{square}.copied_from",
                     (
                         getattr(self.recent_board, f"{square}.copied_from")
                         if getattr(self.recent_board, f"{square}.copied")
                         else getattr(self.recent_board, f"{square}.image_path")
                     )
                 )
-                setattr(self.board_estimation, f"{square}.image_path", image_path)
-                setattr(self.board_estimation, f"{square}.copied", True)
+                setattr(self.board_estimate, f"{square}.image_path", image_path)
+                setattr(self.board_estimate, f"{square}.copied", True)
             else:
                 print(f"Attempting to classify square {square}")
                 # TODO: perhaps also pass additional info?
                 # Like pixel position of square, and some metadata about the robot position?
                 # (I think this is particularly relevant for our own model, which might be able to learn )
                 # valuable things from this.
-                square_estimation = self.estimate_square(image_path)
-                print(f"square estimation:\n{square_estimation}\n\n")
-                setattr(self.board_estimation, square, square_estimation)
+                square_estimate = self.estimate_square(image_path)
+                print(f"square estimate:\n{square_estimate}\n\n")
+                setattr(self.board_estimate, square, square_estimate)
 
-        return self.board_estimation
+        return self.board_estimate
 
 
 if __name__ == "__main__":
@@ -230,12 +288,12 @@ if __name__ == "__main__":
 
     SQUARES = [square for square in sys.argv[3:]]
     print(SQUARES)
-    BoardEstimation = make_dataclass(
-        "BoardEstimation",
-        [(square, SquareEstimation | None, None) for square in SQUARES]
+    BoardEstimate = make_dataclass(
+        "BoardEstimate",
+        [(square, SquareEstimate | None, None) for square in SQUARES]
     )
     board_estimator = BoardEstimator(config)
     print(board_estimator)
     
-    board_estimation = board_estimator.classify_board(squares_dir)
-    print(board_estimation)
+    board_estimate = board_estimator.classify_board(squares_dir)
+    print(board_estimate)
