@@ -79,8 +79,6 @@ class SquareClassifier(nn.Module):
             dim=1
         )
         metadata_features = self.mlp_1(metadata)
-        print(image_features.shape)
-        print(metadata_features.shape)
         mlp_input = torch.cat([image_features, metadata_features], dim=1)
         logits = self.mlp_2(mlp_input)
         return logits

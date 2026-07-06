@@ -266,13 +266,11 @@ class BoardEstimator:
                 setattr(self.board_estimate, f"{square}.image_path", image_path)
                 setattr(self.board_estimate, f"{square}.copied", True)
             else:
-                print(f"Attempting to classify square {square}")
                 # TODO: perhaps also pass additional info?
                 # Like pixel position of square, and some metadata about the robot position?
                 # (I think this is particularly relevant for our own model, which might be able to learn )
                 # valuable things from this.
                 square_estimate = self.estimate_square(image_path)
-                print(f"square estimate:\n{square_estimate}\n\n")
                 setattr(self.board_estimate, square, square_estimate)
 
         return self.board_estimate

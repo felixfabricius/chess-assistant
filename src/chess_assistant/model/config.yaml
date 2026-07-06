@@ -1,8 +1,18 @@
+defaults:
+  - override hydra/job_logging: disabled
+  - _self_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
 model: 1
 note: ""
 
-batch_size: 64
-epochs: 10
+training:
+  batch_size: 64
+  epochs: 10
 
 optimizer:
   lr: 1e-3

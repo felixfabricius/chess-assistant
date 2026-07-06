@@ -3,7 +3,8 @@ import wandb
 import copy
 from torch import nn
 from pathlib import Path
-from omegaconf import OmegaConf
+from omegaconf import DictConfig
+import hydra
 from dotenv import load_dotenv
 
 from chess_assistant.model.model import SquareClassifier
@@ -13,17 +14,18 @@ from chess_assistant.model.evaluate import evaluate
 
 load_dotenv() # for api keys
 
-def main(config_path: Path = "src/chess_assistant/model/config.yaml"):
-    config = OmegaConf.load(config_path)
-
+@hydra.main(config_path=".", config_name="config", version_base=None)
+def main(config: DictConfig):
     run_name = (
+        f"{('[' + config.get('prefix') + '] | ') if config.get('prefix') else ''}"
         f"Model: {config.model}"
         f"{f' | {config.note}' if config.note else ''}"
     )
     run = wandb.init(
         project="chess-assistant",
         name=run_name,
-        config=config
+        config=config,
+        dir=".cache/wandb"
     )
     run.define_metric("epoch") # tells wandb I will log metric
     run.define_metric("*", step_metric="epoch") # for all other metrics matching "*", use epoch as x-axis
@@ -36,10 +38,10 @@ def main(config_path: Path = "src/chess_assistant/model/config.yaml"):
     
     train_dataloader = create_dataloader(
         split="train",
-        batch_size=config.get("batch_size", 64),
+        batch_size=config.training.get("batch_size", 64),
         shuffle=True
     )
-    val_dataloader = create_dataloader("val", 64, False)
+    val_dataloader = create_dataloader("val", batch_size=64, shuffle=False)
 
     # Hyperparameters
     lr = config.optimizer.lr
@@ -53,10 +55,23 @@ def main(config_path: Path = "src/chess_assistant/model/config.yaml"):
         weight_decay=weight_decay
     )
 
-    epochs = config.get("epochs", 1)
+    epochs = config.training.get("epochs", 1)
     for epoch in range(epochs):
-        train_metrics = train(model, train_dataloader, loss_fn, optimizer)
-        val_metrics = evaluate(model, val_dataloader, loss_fn)
+        print(f"Epoch {epoch + 1}\n------------------------------------")
+        train_metrics = train(
+            model=model, 
+            dataloader=train_dataloader, 
+            loss_fn=loss_fn, 
+            optimizer=optimizer,
+            debug=config.get("debug", False)
+        )
+        val_metrics = evaluate(
+            model=model, 
+            dataloader=val_dataloader, 
+            loss_fn=loss_fn, 
+            split="val", 
+            csv_path=Path("data/generated/data.csv")
+        )
 
         run.log({"epoch": epoch, **train_metrics, **val_metrics})
 
@@ -68,16 +83,18 @@ def main(config_path: Path = "src/chess_assistant/model/config.yaml"):
             best_epoch = epoch
 
     # Persist the best version of the model
+    cache_path = Path(".cache")
+    cache_path.mkdir(exist_ok=True)
     torch.save(
         {
             "epoch": best_epoch,
-            "model_state_dict": best_model.state_dict(),
+            "model_state_dict": best_model,
             "optimizer_state_dict": optimizer_state
-        }
-        , "model.pt"
+        },
+        cache_path / "model.pt"
     )
     artifact = wandb.Artifact(name=f"model_and_optimizer", type="model")
-    artifact.add_file("model.pt")
+    artifact.add_file(".cache/model.pt")
     run.log_artifact(artifact)
 
     run.finish()

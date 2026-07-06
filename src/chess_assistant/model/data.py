@@ -80,10 +80,9 @@ class squareDataset(Dataset):
             ])
         metadata = torch.tensor(metadata, dtype=torch.float32)
         
-        if self.split == "train":
-            return image, metadata, label
+        return image, metadata, label
 
-        # Else: also want image_id (to test if equal for all); valid_game_position; previous_board_fen; board_fen; move_uci
+        # TODO: for val/test we may also want image_id (to test if equal for all); valid_game_position; previous_board_fen; board_fen; move_uci
         # Issue with the dataloader approach to "randomly" get just images from one board position in one batch
         # As soon as just one row is removed from the CSV, this might no longer work
         # Alternative approach: load data.csv; then get some mask for the 
