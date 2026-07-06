@@ -14,8 +14,6 @@ def evaluate(model, dataloader, loss_fn, split, csv_path):
         # losses for each individual datapoint;; perhaps averaged across batch
         # accuracy for each individual square
     n = len(dataloader.dataset)
-    n_batches = len(dataloader)
-    batch_size = dataloader.batch_size
     loss = 0
     n_correct = 0
     for (images, metadata, labels) in dataloader:

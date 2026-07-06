@@ -8,7 +8,11 @@ hydra:
   output_subdir: null
 
 model: 1
-note: ""
+note: "Weight: Inverse-Root"
+
+data:
+  weighting: inverse_root
+  csv_path: data/generated/data.csv
 
 training:
   batch_size: 64

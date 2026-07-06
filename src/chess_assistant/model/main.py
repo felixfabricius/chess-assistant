@@ -1,6 +1,8 @@
 import torch
 import wandb
 import copy
+import numpy as np
+import polars as pl
 from torch import nn
 from pathlib import Path
 from omegaconf import DictConfig
@@ -11,6 +13,7 @@ from chess_assistant.model.model import SquareClassifier
 from chess_assistant.model.data import create_dataloader
 from chess_assistant.model.train import train
 from chess_assistant.model.evaluate import evaluate
+from chess_assistant.model.config import TARGET_MAP
 
 load_dotenv() # for api keys
 
@@ -47,8 +50,20 @@ def main(config: DictConfig):
     lr = config.optimizer.lr
     weight_decay = config.optimizer.get("weight_decay", 1e-4)
 
-    # Loss and optimizer
-    loss_fn = nn.CrossEntropyLoss()
+    # 
+    if config.data.get("weighting") == "inverse_root":
+        weights = torch.zeros(13, dtype=torch.float32)
+        csv_path = Path(config.data.get("csv_path"))
+        assert csv_path.exists()
+        data = pl.read_csv(csv_path).filter(pl.col("setup_split").eq("train"))
+        counts = data["label"].value_counts()
+        for row in counts.iter_rows(named=True):
+            weights[TARGET_MAP[row["label"]]] = 1 / np.sqrt(row["count"])
+        loss_fn = nn.CrossEntropyLoss(weight=weights)
+    else:
+        loss_fn = nn.CrossEntropyLoss()
+    eval_loss_fn = nn.CrossEntropyLoss()
+    
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=lr,
@@ -56,8 +71,8 @@ def main(config: DictConfig):
     )
 
     epochs = config.training.get("epochs", 1)
-    for epoch in range(epochs):
-        print(f"\nEpoch {epoch + 1}\n------------------------------")
+    for epoch in range(1, epochs + 1):
+        print(f"\nEpoch {epoch}\n------------------------------")
         train_metrics = train(
             model=model, 
             dataloader=train_dataloader, 
@@ -68,7 +83,7 @@ def main(config: DictConfig):
         val_metrics = evaluate(
             model=model, 
             dataloader=val_dataloader, 
-            loss_fn=loss_fn, 
+            loss_fn=eval_loss_fn, 
             split="val", 
             csv_path=Path("data/generated/data.csv")
         )
