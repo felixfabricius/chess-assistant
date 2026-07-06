@@ -14,6 +14,7 @@ class ChessGame:
     (Easier to debug: if it's not a specific move that I think it is, can try a new one.)
     """
     def __init__(self, fen: str | None = None, model_type: str = "LLM"):
+        fen = fen if fen is not None else "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
         self.board = chess.Board(fen=fen) 
             # allow for passing of FEN to simulate continuation of game from an 
             # arbitrary prior position during evaluation
@@ -46,7 +47,9 @@ class ChessGame:
             square_estimate = getattr(board_estimate, square)
             if self.model_type == "LLM":
                 for piece in PIECES:
-                    piece_at_square = self.board.piece_at(chess.parse_square(square)).symbol()
+                    # TODO: this is not robust to piece_
+                    piece_at_square = self.board.piece_at(chess.parse_square(square))
+                    piece_at_square = "empty" if piece_at_square is None else piece_at_square.symbol()
                     if (
                         (piece == "empty" and piece_at_square is None)
                         or piece == piece_at_square
@@ -55,8 +58,8 @@ class ChessGame:
                     else:
                         initial_loss += getattr(square_estimate, piece) ** 2
             else: # use cross-entropy loss
-                piece_at_square = self.board.piece_at(chess.parse_square(square)).symbol()
-                piece_at_square = "empty" if piece_at_square is None else piece_at_square
+                piece_at_square = self.board.piece_at(chess.parse_square(square))
+                piece_at_square = "empty" if piece_at_square is None else piece_at_square.symbol()
                 initial_loss += self.loss_fn(
                     torch.tensor(
                         [
@@ -69,7 +72,7 @@ class ChessGame:
                         , 
                         dtype=torch.float32
                     ),    
-                    TARGET_MAP[piece_at_square]
+                    torch.tensor(TARGET_MAP[piece_at_square])
                 )
 
             # QUESTION: do I also want to take predictions for other pieces into account?
@@ -81,7 +84,7 @@ class ChessGame:
             # Then access the prediction in board_estimate for that piece
             # And add squared deviation to initial_score
 
-        scored_moves = {}
+        scored_moves = []
         for move in self.board.legal_moves:
             loss_increment = 0
 
@@ -145,16 +148,16 @@ class ChessGame:
                         ],
                         dtype=torch.float32
                     ) 
-                    loss_increment += self.loss_fn(square_pred_tensor, TARGET_MAP[new_piece])
-                    loss_increment -= self.loss_fn(square_pred_tensor, TARGET_MAP[old_piece])
+                    loss_increment += self.loss_fn(square_pred_tensor, torch.tensor(TARGET_MAP[new_piece]))
+                    loss_increment -= self.loss_fn(square_pred_tensor, torch.tensor(TARGET_MAP[old_piece]))
 
-            scored_moves[move.uci()] = initial_loss + loss_increment
-            # Computation of initial loss is not necessary; it does not affect ranking.
+            scored_moves.append({"move": move.uci(), "loss": initial_loss + loss_increment})            # Computation of initial loss is not necessary; it does not affect ranking.
             # Keeping it as an evaluation metric for now.
         
         # Sort candiate moves by likelihood (descending), which means
         # sort in ascending order by error impact of candidate moves
-        return [move for move in sorted(scored_moves.items(), key=lambda x: x[1])]
+        scored_moves.sort(key = lambda x: x["loss"])
+        return scored_moves
 
     def apply_move(self, move_uci):
         move = chess.Move.from_uci(move_uci)

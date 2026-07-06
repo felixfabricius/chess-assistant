@@ -134,7 +134,7 @@ class BoardEstimator:
             assert calibration_metadata_path is not None
             assert model is not None
             with open(calibration_metadata_path, "r") as f:
-                calibration_metadata = json.load(calibration_metadata_path)
+                calibration_metadata = json.load(f)
             self.calibration_metadata = [
                 px_coordinate 
                 for corner in ["a1", "a8", "h8", "h1"] 
@@ -193,7 +193,7 @@ class BoardEstimator:
                 square_metadata = json.load(f)
             metadata.extend([square_metadata[key] for key in ["top", "left"]])
             metadata.extend(self.calibration_metadata)
-            metadata = torch.tensor(metadata, dtype=torch.float32).unsqueeze() # unsqueeze to add batch dimension; TODO: check if necessary
+            metadata = torch.tensor(metadata, dtype=torch.float32).unsqueeze(dim=0) # unsqueeze to add batch dimension; TODO: check if necessary
             assert metadata.shape == (1, 10)
             # TODO: make this more efficient. Perhaps no need to load the setup metadata
             # so often. Can perhaps save this in the board estimator class.
@@ -203,7 +203,7 @@ class BoardEstimator:
             rgb = image[..., :3]
             transformed_rgb = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)])(rgb)
             mask = torch.tensor(image[..., 3], dtype=torch.float32)
-            image = torch.cat([transformed_rgb, mask.unsqueeze()]).unsqueeze()
+            image = torch.cat([transformed_rgb, mask.unsqueeze(dim=0)]).unsqueeze(dim=0)
             assert image.shape == (1, 4, 144, 144)
             
             logits = self.model(image, metadata).squeeze()
@@ -219,7 +219,7 @@ class BoardEstimator:
 
             for label in INVERSE_TARGET_MAP.keys():
                 # label takes values in 0, ..., 12
-                setattr(square_estimate, INVERSE_TARGET_MAP[label], logits[label])
+                setattr(square_estimate, INVERSE_TARGET_MAP[label], logits[label].item())
 
             return square_estimate
 
