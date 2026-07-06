@@ -22,6 +22,6 @@ def train(model, dataloader, loss_fn, optimizer, debug):
             n_loss_samples += n_batch
     
     return {
-        "train/square/recent_loss": loss / n_loss_samples,
+        "train/square/recent_loss": total_loss / n_loss_samples,
         "train/square/n_recent_loss": n_loss_samples,
     }

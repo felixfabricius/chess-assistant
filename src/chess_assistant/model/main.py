@@ -57,7 +57,7 @@ def main(config: DictConfig):
 
     epochs = config.training.get("epochs", 1)
     for epoch in range(epochs):
-        print(f"Epoch {epoch + 1}\n------------------------------------")
+        print(f"\nEpoch {epoch + 1}\n------------------------------")
         train_metrics = train(
             model=model, 
             dataloader=train_dataloader, 

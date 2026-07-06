@@ -1,3 +1,4 @@
+import torch
 import polars as pl
 import numpy as np
 
@@ -5,6 +6,8 @@ from pathlib import Path
 
 from chess_assistant.vision import BoardEstimator
 from chess_assistant.game import ChessGame
+
+_split_data_cache = {}
 
 def evaluate(model, dataloader, loss_fn, split, csv_path):
     ### Calculate:
@@ -19,8 +22,9 @@ def evaluate(model, dataloader, loss_fn, split, csv_path):
         # Items in batch
         n_batch = labels.shape[0]
         # Get loss
-        logits = model(images, metadata)
-        loss += loss_fn(logits, labels).item() * n_batch
+        with torch.no_grad():
+            logits = model(images, metadata)
+            loss += loss_fn(logits, labels).item() * n_batch
             # loss_fn returns the mean loss over items in batch; 
             # reason: default "reduction" of nn.CrossEntropyLoss is "mean"
             # therefore: sum this to be loss across all datapoints in batch, and then
@@ -39,13 +43,16 @@ def evaluate(model, dataloader, loss_fn, split, csv_path):
         # note: this dataloader should therefore perhaps operate at this slightly higher level?
         # i.e. we always want to make predicitons for al the squares of a board - don't want to mix 
         # between boards.
-    data = (
-        pl.read_csv(csv_path)
-        .filter(
-            pl.col("setup_split").eq(split),
-            pl.col("valid_game_position")
+    cache_key = (str(csv_path), split)
+    if cache_key not in _split_data_cache:
+        _split_data_cache[cache_key] = (
+            pl.read_csv(csv_path)
+            .filter(
+                pl.col("setup_split").eq(split),
+                pl.col("valid_game_position")
+            )
         )
-    )
+    data = _split_data_cache[cache_key]
 
     # For each of the unique positions, 
     board_position_ids = data.unique("image_id")["image_id"]
@@ -80,13 +87,19 @@ def evaluate(model, dataloader, loss_fn, split, csv_path):
         assert game.board.is_valid() # should not arrive at an invalid position this way
         estimated_moves = game.estimate_move(board_estimator.board_estimate)
 
+        if len(estimated_moves) == 0:
+            continue
+
         # This returns list of moves
         if estimated_moves[0]["move"] == board_position_data["move_uci"]:
             correct_moves += 1
 
         for i, scored_move in enumerate(estimated_moves):
             if scored_move["move"] == board_position_data["move_uci"]:
-                correct_move_normalised_rank.append(1 - i / (len(estimated_moves) - 1)) 
+                correct_move_normalised_rank.append(1 - i / len(estimated_moves)) 
+                # TODO: should not divide by len(estimated_moves) - 1; should be
+                # len(estimated_moves)
+                continue
         
         n_valid += 1
     
