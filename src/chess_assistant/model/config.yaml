@@ -1,3 +1,6 @@
+model: 1
+note: ""
+
 batch_size: 64
 epochs: 10
 

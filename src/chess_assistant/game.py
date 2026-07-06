@@ -1,6 +1,9 @@
 import chess
+import torch
+from torch import nn
 
 from chess_assistant.config import SQUARES, PIECES
+from chess_assistant.model.config import TARGET_MAP, INVERSE_TARGET_MAP
 
 class ChessGame:
     """
@@ -16,6 +19,8 @@ class ChessGame:
             # arbitrary prior position during evaluation
         assert model_type in ["LLM", "CNN"]
         self.model_type = model_type
+        if self.model_type == "CNN":
+            self.loss_fn = nn.CrossEntropyLoss()
     
     def fen(self):
         return self.board.fen()
@@ -38,16 +43,35 @@ class ChessGame:
         # Score based on the previous board position.
         initial_loss = 0
         for square in SQUARES:
-            for piece in PIECES:
+            square_estimate = getattr(board_estimate, square)
+            if self.model_type == "LLM":
+                for piece in PIECES:
+                    piece_at_square = self.board.piece_at(chess.parse_square(square)).symbol()
+                    if (
+                        (piece == "empty" and piece_at_square is None)
+                        or piece == piece_at_square
+                    ):
+                        initial_loss += (1 - getattr(square_estimate, piece)) ** 2
+                    else:
+                        initial_loss += getattr(square_estimate, piece) ** 2
+            else: # use cross-entropy loss
                 piece_at_square = self.board.piece_at(chess.parse_square(square)).symbol()
-                if (
-                    (piece == "empty" and piece_at_square is None)
-                    or piece == piece_at_square
-                ):
-                    initial_loss += (1 - getattr(board_estimate, f"{square}.{piece}")) ** 2
-                else:
-                    initial_loss += getattr(board_estimate, f"{square}.{piece}") ** 2
-            
+                piece_at_square = "empty" if piece_at_square is None else piece_at_square
+                initial_loss += self.loss_fn(
+                    torch.tensor(
+                        [
+                            getattr(square_estimate, INVERSE_TARGET_MAP[target])
+                            for target in range(13) 
+                            # the double for loop here is a bit convoluted;
+                            # reason: each target maps to exactly one piece; therefore
+                            # no need for iteration
+                        ]
+                        , 
+                        dtype=torch.float32
+                    ),    
+                    TARGET_MAP[piece_at_square]
+                )
+
             # QUESTION: do I also want to take predictions for other pieces into account?
             # E.g. 3 pieces. if i have 
                 # A: 0, 0,8, 0.2
@@ -103,14 +127,30 @@ class ChessGame:
 
                 score -= getattr(board_estimate, f"{square}.{new_piece}") ** 2
                 score += getattr(board_estimate, f"{square}.{old_piece}") ** 2
+
+                CAREFUL: getattr does apparently not support nested attribute access.
                 
                 So for new piece, we add (1 - x) ** 2 - x ** 2 = -2x + 1
                 For old piece, we subtract -2x + 1
                 """
-                loss_increment += -2 * getattr(board_estimate, f"{square}.{new_piece}") + 1
-                loss_increment += 2 * getattr(board_estimate, f"{square}.{old_piece}") - 1
-            
-            scored_moves[move.uci()] = loss_increment
+                square_estimate = getattr(board_estimate, square)
+                if self.model_type == "LLM":
+                    loss_increment += -2 * getattr(square_estimate, new_piece) + 1
+                    loss_increment += 2 * getattr(square_estimate, old_piece) - 1
+                else:
+                    square_pred_tensor = torch.tensor(
+                        [
+                            getattr(square_estimate, INVERSE_TARGET_MAP[target])
+                            for target in range(13)
+                        ],
+                        dtype=torch.float32
+                    ) 
+                    loss_increment += self.loss_fn(square_pred_tensor, TARGET_MAP[new_piece])
+                    loss_increment -= self.loss_fn(square_pred_tensor, TARGET_MAP[old_piece])
+
+            scored_moves[move.uci()] = initial_loss + loss_increment
+            # Computation of initial loss is not necessary; it does not affect ranking.
+            # Keeping it as an evaluation metric for now.
         
         # Sort candiate moves by likelihood (descending), which means
         # sort in ascending order by error impact of candidate moves

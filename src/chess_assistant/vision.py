@@ -246,6 +246,15 @@ class BoardEstimator:
                 # Note that this also overwrites self.recent_board. 
                 # So maybe no need to pretend we have two separate objects here?
                 # Just use self.board for everything?
+                """
+                TODO: fix this section. Not sure this is correct. (Also perhaps think about valid 
+                condition in the if-statement.)
+                When fixing, carefully note that getattr and setattr apparently do not support
+                nested attribute access.
+
+                To search for such patterns: getattr\([^)\n]*\.
+                """
+                square_estimate = getattr(self.recent_board, square)
                 setattr(
                     self.board_estimate, f"{square}.copied_from",
                     (

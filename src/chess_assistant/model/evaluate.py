@@ -1,15 +1,37 @@
 import polars as pl
+import torch
 
 from pathlib import Path
 
 from chess_assistant.vision import BoardEstimator
 from chess_assistant.game import ChessGame
 
-def evaluate(model, loss_fn, split, csv_path):
+def evaluate(model, loss_fn, dataloader, split, csv_path):
     ### Calculate:
         # losses for each individual datapoint;; perhaps averaged across batch
         # accuracy for each individual square
-    
+    n = len(dataloader.dataset)
+    n_batches = len(dataloader)
+    batch_size = dataloader.batch_size
+    loss = 0
+    n_correct = 0
+    for (images, metadata, labels) in dataloader:
+        # Items in batch
+        n_batch = labels.shape[0]
+        # Get loss
+        logits = model(images, metadata)
+        loss += loss_fn(logits, labels).item() * n_batch
+            # loss_fn returns the mean loss over items in batch; 
+            # reason: default "reduction" of nn.CrossEntropyLoss is "mean"
+            # therefore: sum this to be loss across all datapoints in batch, and then
+            # divide by number of datapoints later
+            # at this step, this would be identical to specifying CE loss with reduction = "mean"
+        n_correct += (logits.argmax(dim=1) == labels).sim().item()
+            # Original version was: torch.sum(torch.argmax(logits, 1) == labels).item()
+            # But method access is a bit neater
+    avg_loss = loss / n
+    prop_correct = n_correct / n
+
     ### On position level
         # check if current position is valid - this should also be returned from dataloader
         # if it is; then return previous fen
@@ -27,6 +49,9 @@ def evaluate(model, loss_fn, split, csv_path):
 
     # For each of the unique positions, 
     board_position_ids = data.unique("image_id")["image_id"]
+
+    correct_moves = 0
+    n_valid = 0
 
     for board_position_id in board_position_ids:
         # TODO: perhaps write test to check that .first() would yield same exact result
@@ -52,11 +77,20 @@ def evaluate(model, loss_fn, split, csv_path):
 
         game = ChessGame(fen=board_position_data["previous_board_fen"], model_type="CNN")
         assert game.board.is_valid() # should not arrive at an invalid position this way
-        game.estimate_move(board_estimator.board_estimate)
+        estimated_moves = game.estimate_move(board_estimator.board_estimate)
 
         # This returns list of moves
+        if estimated_moves[0] == board_position_data["move_uci"]:
+            correct_moves += 1
         
-                # Find the unique squares_directory associated with that position
-        # Also find the unique previous FEN
-        # And find the current move
-            # TODO: perhaps rewrite so this doesn't require a config?
+        n_valid += 1
+    
+    metrics = {
+        "eval/square/n": n,
+        "eval/square/avg_loss": avg_loss,
+        "eval/square/prop_correct_square": prop_correct,
+        "eval/board/n_valid": n_valid,
+        "eval/board/prop_correct_board": correct_moves / n_valid
+    }
+
+    return metrics
