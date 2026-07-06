@@ -335,7 +335,7 @@ class Processor:
                     # where the square is located, depends just on the padding
                 square_right_cutout = self.padding["left"] + square_size
                 square_top_cutout = self.padding["up"]
-                square_bottom_cutout = self.padding["up"] + square_size + self.padding["down"]
+                square_bottom_cutout = self.padding["up"] + square_size
 
                  # Add a fourth masking channel
                 mask = np.zeros_like(square_cutout[:,:,0])
