@@ -19,6 +19,9 @@ load_dotenv() # for api keys
 
 @hydra.main(config_path=".", config_name="config", version_base=None)
 def main(config: DictConfig):
+    if config.data.weighting == "inverse_root" and config.note == "":
+        config.note = "Weighting: Inverse Root"
+
     run_name = (
         f"{('[' + config.get('prefix') + '] | ') if config.get('prefix') else ''}"
         f"Model: {config.model}"

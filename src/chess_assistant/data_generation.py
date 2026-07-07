@@ -495,9 +495,9 @@ class BoardUI:
         self.width = self.MARGIN * 2 + board_px + self.PANEL
         self.height = self.MARGIN * 2 + board_px
         self.screen = pygame.display.set_mode((self.width, self.height))
-        self.piece_font = pygame.font.SysFont("consolas", 46, bold=True)
         self.label_font = pygame.font.SysFont("consolas", 16)
         self.panel_font = pygame.font.SysFont("consolas", 18)
+        self.piece_images = self._load_piece_images()
 
         # Interaction state.
         self.selected: str | None = None          # source square for a move
@@ -505,6 +505,24 @@ class BoardUI:
         self.promotion: tuple[str, str] | None = None  # (from, to) awaiting choice
         self.message = "Press 'r' to calibrate a setup, then Space to capture."
         self.running = True
+
+    # -- piece assets --------------------------------------------------------
+
+    def _load_piece_images(self) -> dict:
+        """Rasterise the 12 piece SVGs (Cburnett set, bundled with python-chess)
+        to pygame surfaces sized to fit a square, once, at startup.
+        """
+        import io
+        import chess.svg
+
+        images = {}
+        svg_size = self.SQUARE - 10  # small margin so pieces don't touch grid lines
+        for symbol in PIECE_SYMBOLS:
+            piece = chess.Piece.from_symbol(symbol)
+            svg_data = chess.svg.piece(piece, size=svg_size)
+            surface = self.pg.image.load(io.BytesIO(svg_data.encode("utf-8")), f"{symbol}.svg")
+            images[symbol] = surface.convert_alpha()
+        return images
 
     # -- coordinate helpers -------------------------------------------------
 
@@ -530,15 +548,8 @@ class BoardUI:
     # -- drawing ------------------------------------------------------------
 
     def _draw_piece(self, symbol: str, rect) -> None:
-        is_white = symbol.isupper()
-        fill = (245, 245, 245) if is_white else (25, 25, 25)
-        outline = (25, 25, 25) if is_white else (245, 245, 245)
-        base = self.piece_font.render(symbol, True, fill)
-        line = self.piece_font.render(symbol, True, outline)
-        centered = base.get_rect(center=rect.center)
-        for dx, dy in ((-2, 0), (2, 0), (0, -2), (0, 2)):
-            self.screen.blit(line, (centered.x + dx, centered.y + dy))
-        self.screen.blit(base, centered)
+        image = self.piece_images[symbol]
+        self.screen.blit(image, image.get_rect(center=rect.center))
 
     def _draw_board(self) -> None:
         for square in SQUARES:

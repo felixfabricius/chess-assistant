@@ -8,7 +8,7 @@ hydra:
   output_subdir: null
 
 model: 1
-note: "Weight: Inverse-Root"
+note: ""
 
 data:
   weighting: inverse_root
@@ -16,8 +16,8 @@ data:
 
 training:
   batch_size: 64
-  epochs: 10
+  epochs: 50
 
 optimizer:
-  lr: 1e-3
+  lr: 5e-4
   weight_decay: 1e-4
