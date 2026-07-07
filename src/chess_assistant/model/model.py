@@ -23,6 +23,10 @@ class SquareClassifier(nn.Module):
             - Then also: where to look for piece: mask 
 
         To add: some normalisation? Batch norm / group norm etc?
+
+        Note that current ratio is: around 10k square cropouts in training data; and around 450k
+        parameters in model. That might be ambitious.
+        -> data augmentation now; and perhaps: also try smaller model.
         """
         # Downsample using max pool
         self.max_pool_1 = nn.MaxPool2d(

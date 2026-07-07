@@ -9,7 +9,7 @@ from omegaconf import DictConfig, OmegaConf
 import hydra
 from dotenv import load_dotenv
 
-from chess_assistant.model.model import SquareClassifier
+from chess_assistant.model.model import SquareClassifier, SquareClassifier2
 from chess_assistant.model.data import create_dataloader
 from chess_assistant.model.train import train
 from chess_assistant.model.evaluate import evaluate
@@ -40,7 +40,8 @@ def main(config: DictConfig):
     run.define_metric("epoch") # tells wandb I will log metric
     run.define_metric("*", step_metric="epoch") # for all other metrics matching "*", use epoch as x-axis
 
-    model = SquareClassifier()
+    assert config.model in [1, 2]
+    model = SquareClassifier() if config.model == 1 else SquareClassifier2()
     lowest_loss = float("inf")
     best_model = None
     optimizer_state = None

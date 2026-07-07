@@ -1,27 +1,41 @@
 import polars as pl
 import numpy as np
 import json
-import torch
 
+import torch
 from torch.utils.data import DataLoader, Dataset
+from torchvision import tv_tensors
 from torchvision.transforms import v2
+
 from pathlib import Path
 
 from chess_assistant.model.config import TARGET_MAP
+
+TRAIN_TRANSFORM = v2.Compose([
+    v2.ToImage(), 
+    v2.ToDtype(torch.float32, scale=True),
+    v2.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.15, hue=0.03),
+    v2.GaussianBlur(kernel_size=5, sigma=(1e-3, 1)), # kernel_size 5, so this is wider than the conv kernels
+    v2.GaussianNoise(mean=0.0, sigma=0.02),
+    v2.RandomAffine(degrees=0, translate=(0.04, 0.04), scale=(0.93, 1.07))
+])
+
+EVAL_TRANSFORM = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)])
 
 class squareDataset(Dataset):
     def __init__(
         self, 
         csv_path: Path = Path("data/generated/data.csv"), 
         split: str = "train",
-        transform = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)]), 
+        train_transform= v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)]), 
+        eval_transform = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)]),
         target_transform = TARGET_MAP.__getitem__,
     ):
         if split not in ["train", "val", "test"]:
             raise ValueError(f"Split must be of type train, val or test. Got {split}.")
         self.data = pl.read_csv(csv_path).filter(pl.col("setup_split").eq(split))
         self.split = split
-        self.transform = transform
+        self.transform = train_transform if split == "train" else eval_transform
         self.target_transform = target_transform
 
         # TODO: support transforms;
@@ -45,12 +59,17 @@ class squareDataset(Dataset):
             # in {0, 1} rather than {0, 255}, so scale would make them too
             # small
             rgb = image[..., :3]
+            mask = tv_tensors.Mask(image[..., 3]) 
+                # CAREFUL: can't do .unsqueeze(dim=0) operation here; 
+                # reason: this would downgrade the mask to a normal tensor
+
+            # Note that the same transform object transforms differently each time
             transformed_rgb = self.transform(rgb)
-            mask = torch.tensor(image[..., 3], dtype=torch.float32)
-            image = torch.cat(
-                [transformed_rgb, mask.unsqueeze(dim=0)], # dim = 0 is default
-                dim=0 # dim=0 is default
-            )
+            transformed_mask = self.transform(mask).unsqueeze(dim=0) # only unsqueeze now!!
+                # the transforms that we don't want this to impact will not impact this!
+                # e.g. v2.ToImage(), v2.GaussianNoise(...), ...
+            
+            image = torch.cat([transformed_rgb, transformed_mask], dim=0)
             # Note that shape is now (4, H, W) (rather than (H, W, 4))
             # Note also that type(transformed_image) is torch.Tensor
             # rather than a torchvision image (which is a subclass of Tensor)
@@ -97,7 +116,8 @@ def create_dataloader(
     split: str,
     shuffle: bool = False,
     batch_size: int = 64,
-    transform = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)]),
+    train_transform = TRAIN_TRANSFORM, 
+    eval_transform = EVAL_TRANSFORM,
     target_transform = TARGET_MAP.__getitem__,
     csv_path = Path("data/generated/data.csv")
 ):  
@@ -106,9 +126,9 @@ def create_dataloader(
     dataset = squareDataset(
         csv_path=csv_path, 
         split=split, 
-        transform=transform, 
+        train_transform=train_transform,
+        eval_transform=eval_transform, 
         target_transform=target_transform
-
     )
 
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
