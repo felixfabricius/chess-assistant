@@ -5,7 +5,7 @@ import numpy as np
 import polars as pl
 from torch import nn
 from pathlib import Path
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 import hydra
 from dotenv import load_dotenv
 
@@ -21,7 +21,11 @@ load_dotenv() # for api keys
 def main(config: DictConfig):
     if config.data.weighting == "inverse_root" and config.note == "":
         config.note = "Weighting: Inverse Root"
-
+    if config.get("debug") and not config.get("prefix"):
+        # Standard version might not work because config is in "struct mode", which
+        # is meant to prevent actual adding of keys to config
+        # config.prefix = "[test run]"
+        OmegaConf.update(config, "prefix", "test run", force_add=True)
     run_name = (
         f"{('[' + config.get('prefix') + '] | ') if config.get('prefix') else ''}"
         f"Model: {config.model}"
@@ -102,7 +106,7 @@ def main(config: DictConfig):
 
     # Persist the best version of the model
     cache_path = Path(".cache") / f"model_{run.id}.pt"
-    cache_path.mkdir(exist_ok=True)
+    cache_path.parent.mkdir(exist_ok=True)
     torch.save(
         {
             "epoch": best_epoch,
@@ -117,7 +121,6 @@ def main(config: DictConfig):
 
     run.finish()
 
-    # Load dataset
     return None 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 def train(model, dataloader, loss_fn, optimizer, debug):
+    model.train()
     n_batches = len(dataloader)
     loss_logging_threshold = n_batches * 0.8 // 1
     n_loss_samples = 0
@@ -22,6 +23,6 @@ def train(model, dataloader, loss_fn, optimizer, debug):
             n_loss_samples += n_batch
     
     return {
-        "train/square/recent_loss": total_loss / n_loss_samples,
+        "train/square/recent_loss": total_loss / n_loss_samples if not debug else 0, # can get DivByZero Error if debugging
         "train/square/n_recent_loss": n_loss_samples,
     }

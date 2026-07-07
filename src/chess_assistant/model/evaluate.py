@@ -1,21 +1,26 @@
 import torch
 import polars as pl
 import numpy as np
+import wandb
 
 from pathlib import Path
 
 from chess_assistant.vision import BoardEstimator
 from chess_assistant.game import ChessGame
+from chess_assistant.model.config import INVERSE_TARGET_MAP
 
 _split_data_cache = {}
 
 def evaluate(model, dataloader, loss_fn, split, csv_path):
+    model.eval() # important for batch norm; want to use mean and sd that were accumulated during training
     ### Calculate:
         # losses for each individual datapoint;; perhaps averaged across batch
         # accuracy for each individual square
     n = len(dataloader.dataset)
     loss = 0
     n_correct = 0
+    all_labels = []
+    all_preds = []
     for (images, metadata, labels) in dataloader:
         # Items in batch
         n_batch = labels.shape[0]
@@ -23,16 +28,31 @@ def evaluate(model, dataloader, loss_fn, split, csv_path):
         with torch.no_grad():
             logits = model(images, metadata)
             loss += loss_fn(logits, labels).item() * n_batch
-            # loss_fn returns the mean loss over items in batch; 
+            # loss_fn returns the mean loss over items in batch;
             # reason: default "reduction" of nn.CrossEntropyLoss is "mean"
             # therefore: sum this to be loss across all datapoints in batch, and then
             # divide by number of datapoints later
             # at this step, this would be identical to specifying CE loss with reduction = "mean"
-        n_correct += (logits.argmax(dim=1) == labels).sum().item()
+        preds = logits.argmax(dim=1)
+        n_correct += (preds == labels).sum().item()
             # Original version was: torch.sum(torch.argmax(logits, 1) == labels).item()
             # But method access is a bit neater
+
+        all_labels.append(labels)
+        all_preds.append(preds)
+
     avg_loss = loss / n
     prop_correct = n_correct / n
+
+    # W&B's confusion-matrix chart sorts axis labels alphabetically, ignoring
+    # table row order; zero-padded index prefixes make alphabetical order
+    # coincide with TARGET_MAP order.
+    class_names = [f"{i:02d}_{INVERSE_TARGET_MAP[i]}" for i in range(13)]
+    confusion_matrix_plot = wandb.plot.confusion_matrix(
+        y_true=torch.cat(all_labels).numpy(),
+        preds=torch.cat(all_preds).numpy(),
+        class_names=class_names,
+    )
 
     ### On position level
         # check if current position is valid - this should also be returned from dataloader
@@ -107,7 +127,8 @@ def evaluate(model, dataloader, loss_fn, split, csv_path):
         "eval/square/prop_correct_square": prop_correct,
         "eval/board/n_valid": n_valid,
         "eval/board/prop_correct_board": correct_moves / n_valid if n_valid > 0 else None,
-        "eval/board/correct_normalised_rank": np.mean(correct_move_normalised_rank)
+        "eval/board/correct_normalised_rank": np.mean(correct_move_normalised_rank),
+        "eval/square/confusion_matrix": confusion_matrix_plot,
     }
 
     return metrics
