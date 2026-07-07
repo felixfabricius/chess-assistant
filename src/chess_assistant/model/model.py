@@ -83,3 +83,25 @@ class SquareClassifier(nn.Module):
         logits = self.mlp_2(mlp_input)
         return logits
 
+
+if __name__ == "__main__":
+    model = SquareClassifier()
+    n_params = sum(p.numel() for p in model.parameters())
+    n_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    print(f"Parameters: {n_params} | Trainable: {n_trainable_params}\n")
+
+    for name, module in model.named_children():
+        n_params = sum(p.numel() for p in module.parameters())
+        print(f"{name} {n_params}")
+
+    print("")
+
+    for name, module in model.named_modules():
+        if name == "":
+            continue
+            
+        n_params = sum(p.numel() for p in module.parameters(recurse=False)) # recurse=False -> don't double count params in the children
+
+        if n_params > 0:
+            print(f"{name}: {n_params}")

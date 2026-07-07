@@ -101,7 +101,7 @@ def main(config: DictConfig):
             best_epoch = epoch
 
     # Persist the best version of the model
-    cache_path = Path(".cache")
+    cache_path = Path(".cache") / f"model_{run.id}.pt"
     cache_path.mkdir(exist_ok=True)
     torch.save(
         {
@@ -109,10 +109,10 @@ def main(config: DictConfig):
             "model_state_dict": best_model,
             "optimizer_state_dict": optimizer_state
         },
-        cache_path / "model.pt"
+        cache_path
     )
     artifact = wandb.Artifact(name=f"model_and_optimizer", type="model")
-    artifact.add_file(".cache/model.pt")
+    artifact.add_file(cache_path)
     run.log_artifact(artifact)
 
     run.finish()
