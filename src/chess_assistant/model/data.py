@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import tv_tensors
 from torchvision.transforms import v2
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from chess_assistant.model.config import TARGET_MAP
 
@@ -48,7 +48,11 @@ class squareDataset(Dataset):
 
     def __getitem__(self, idx):
         square = self.data[idx, "square"]
-        img_path = Path(self.data[idx, "square_image_path"]).parent / f"{square}_masked.npy"
+        # square_image_path in the csv was written with str(Path(...)) on whichever OS
+        # generated the data (currently Windows), so it may contain "\" separators.
+        # Parse it as a Windows path first so it resolves correctly on Linux too.
+        raw_path = PureWindowsPath(self.data[idx, "square_image_path"]).as_posix()
+        img_path = Path(raw_path).parent / f"{square}_masked.npy"
             # TODO: remove this above workaround. Necessary at the moment because the
             # wrong image paths are saved in the csv.
             # TODO: not sure this way of accessing polars row item is robust to having no rows with that split.
