@@ -10,7 +10,9 @@ from dotenv import load_dotenv
 from dataclasses import dataclass, make_dataclass
 import anthropic
 import torch
+from torchvision import tv_tensors
 from torchvision.transforms import v2
+
 import numpy as np
 
 
@@ -18,6 +20,7 @@ from omegaconf import OmegaConf, DictConfig
 
 from chess_assistant.config import SQUARES
 from chess_assistant.model.config import INVERSE_TARGET_MAP
+from chess_assistant.model.data import EVAL_TRANSFORM
 
 load_dotenv()
 
@@ -107,7 +110,7 @@ def infer_fen_from_image(image_path: Path, model: str = "claude-opus-4-8", promp
     return message.content[0].text
 
 class BoardEstimator:
-    def __init__(self, model_type: str = "CNN", config: DictConfig | None = None, calibration_metadata_path: Path | None = None, model = None):
+    def __init__(self, model_type: str = "CNN", config: DictConfig | None = None, calibration_metadata_path: Path | None = None, model = None, device = None):
         """
         Keep track of:
         - recent board estimate
@@ -133,6 +136,8 @@ class BoardEstimator:
         else:
             assert calibration_metadata_path is not None
             assert model is not None
+            assert device in ["cpu", "cuda", None, torch.device("cpu"), torch.device("cuda")]
+            self.device = torch.device(device) if device is not None else torch.device("cpu")
             with open(calibration_metadata_path, "r") as f:
                 calibration_metadata = json.load(f)
             self.calibration_metadata = [
@@ -140,7 +145,7 @@ class BoardEstimator:
                 for corner in ["a1", "a8", "h8", "h1"] 
                 for px_coordinate in calibration_metadata["actual_corners_px"][corner]
             ]
-            self.model = model
+            self.model = model.to(self.device)
         self.model_type = model_type
 
     def estimate_square(self, image_path: Path) -> SquareEstimate: 
@@ -193,7 +198,7 @@ class BoardEstimator:
                 square_metadata = json.load(f)
             metadata.extend([square_metadata[key] for key in ["top", "left"]])
             metadata.extend(self.calibration_metadata)
-            metadata = torch.tensor(metadata, dtype=torch.float32).unsqueeze(dim=0) # unsqueeze to add batch dimension; TODO: check if necessary
+            metadata = torch.tensor(metadata, dtype=torch.float32).unsqueeze(dim=0).to(self.device) # unsqueeze to add batch dimension; TODO: check if necessary
             assert metadata.shape == (1, 10)
             # TODO: make this more efficient. Perhaps no need to load the setup metadata
             # so often. Can perhaps save this in the board estimator class.
@@ -201,13 +206,14 @@ class BoardEstimator:
             # For the image
             image = np.load(square_dir / f"{square}_masked.npy")
             rgb = image[..., :3]
-            transformed_rgb = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)])(rgb)
-            mask = torch.tensor(image[..., 3], dtype=torch.float32)
-            image = torch.cat([transformed_rgb, mask.unsqueeze(dim=0)]).unsqueeze(dim=0)
+            mask = tv_tensors.Mask(image[..., 3])
+            rgb = EVAL_TRANSFORM(rgb)
+            mask = EVAL_TRANSFORM(mask).unsqueeze(dim=0)
+            image = torch.cat([rgb, mask]).unsqueeze(dim=0).to(self.device)
             assert image.shape == (1, 4, 144, 144)
             
             logits = self.model(image, metadata).squeeze()
-            # Shape of the logits will be (1, 13)
+            # Shape of the non-squeezed logits would be (1, 13)
 
             # Now turn the logits into the square prediction;
             # Perhaps just maintain the raw logits?

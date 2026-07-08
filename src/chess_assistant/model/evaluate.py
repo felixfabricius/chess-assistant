@@ -11,7 +11,7 @@ from chess_assistant.model.config import INVERSE_TARGET_MAP
 
 _split_data_cache = {}
 
-def evaluate(model, dataloader, loss_fn, split, csv_path):
+def evaluate(model, dataloader, loss_fn, split, csv_path, device):
     model.eval() # important for batch norm; want to use mean and sd that were accumulated during training
     ### Calculate:
         # losses for each individual datapoint;; perhaps averaged across batch
@@ -21,7 +21,8 @@ def evaluate(model, dataloader, loss_fn, split, csv_path):
     n_correct = 0
     all_labels = []
     all_preds = []
-    for (images, metadata, labels) in dataloader:
+    for images, metadata, labels in dataloader:
+        images, metadata, labels = images.to(device, non_blocking=True), metadata.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         # Items in batch
         n_batch = labels.shape[0]
         # Get loss
@@ -49,8 +50,8 @@ def evaluate(model, dataloader, loss_fn, split, csv_path):
     # coincide with TARGET_MAP order.
     class_names = [f"{i:02d}_{INVERSE_TARGET_MAP[i]}" for i in range(13)]
     confusion_matrix_plot = wandb.plot.confusion_matrix(
-        y_true=torch.cat(all_labels).numpy(),
-        preds=torch.cat(all_preds).numpy(),
+        y_true=torch.cat(all_labels).to("cpu").numpy(),
+        preds=torch.cat(all_preds).to("cpu").numpy(),
         class_names=class_names,
     )
 
@@ -97,7 +98,8 @@ def evaluate(model, dataloader, loss_fn, split, csv_path):
         board_estimator = BoardEstimator(
             model_type="CNN",
             model=model,
-            calibration_metadata_path=Path("data/generated") / board_position_data["setup_id"] / "calibration_metadata.json"
+            calibration_metadata_path=Path("data/generated") / board_position_data["setup_id"] / "calibration_metadata.json",
+            device=device
         )
         board_estimator.estimate_board(squares_dir)
 

@@ -37,6 +37,7 @@ class squareDataset(Dataset):
         self.split = split
         self.transform = train_transform if split == "train" else eval_transform
         self.target_transform = target_transform
+        self.setup_metadata_store = {}
 
         # TODO: support transforms;
         # Transform images using torchvision v2 transforms ToImage, ToDtype etc. 
@@ -89,14 +90,18 @@ class squareDataset(Dataset):
         with open(square_metadata_path, "r") as f:
             square_metadata = json.load(f)
             metadata.extend([square_metadata[key] for key in ["top", "left"]])
-        setup_metadata_path = Path("data/generated") / self.data[idx, "setup_id"] / "calibration_metadata.json"
-        with open(setup_metadata_path, "r") as f:
-            setup_metadata = json.load(f)
-            metadata.extend([
+        
+        setup_id = self.data[idx, "setup_id"]
+        if setup_id not in self.setup_metadata_store:
+            setup_metadata_path = Path("data/generated") / setup_id / "calibration_metadata.json"
+            with open(setup_metadata_path, "r") as f:
+                setup_metadata = json.load(f)
+            self.setup_metadata_store[setup_id] = [
                 px_coordinate 
                 for corner in ["a1", "a8", "h8", "h1"] 
                 for px_coordinate in setup_metadata["actual_corners_px"][corner]
-            ])
+            ]
+        metadata.extend(self.setup_metadata_store[setup_id])
         metadata = torch.tensor(metadata, dtype=torch.float32)
         
         return image, metadata, label
@@ -116,10 +121,13 @@ def create_dataloader(
     split: str,
     shuffle: bool = False,
     batch_size: int = 64,
+    num_workers: int = 0,
+    persistent_workers: bool = False,
+    pin_memory: bool = False,
     train_transform = TRAIN_TRANSFORM, 
     eval_transform = EVAL_TRANSFORM,
     target_transform = TARGET_MAP.__getitem__,
-    csv_path = Path("data/generated/data.csv")
+    csv_path = Path("data/generated/data.csv"),
 ):  
     if split not in ["train", "val", "test"]:
         raise ValueError(f"Split must be of type train, val or test. Got {split}.")
@@ -131,6 +139,13 @@ def create_dataloader(
         target_transform=target_transform
     )
 
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        persistent_workers=persistent_workers,
+        pin_memory=pin_memory
+    )
 
     return dataloader

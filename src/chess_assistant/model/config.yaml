@@ -13,6 +13,15 @@ note: ""
 data:
   weighting: inverse_root
   csv_path: data/generated/data.csv
+  dataloader:
+    num_workers: 3
+    # Without this, workers are shut down and restarted after each Epoch.
+    # That's costly on Windows, where workers can be created only via the 'spawn', 
+    # rather than Linux's 'fork', which copies current memory state.
+    # 'spawn' means that e.g. all the import need to happen again. 
+    persistent_workers: True
+    pin_memory: True
+    
 
 training:
   batch_size: 64

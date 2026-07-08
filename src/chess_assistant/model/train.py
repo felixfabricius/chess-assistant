@@ -1,10 +1,11 @@
-def train(model, dataloader, loss_fn, optimizer, debug):
+def train(model, dataloader, loss_fn, optimizer, debug, device):
     model.train()
     n_batches = len(dataloader)
     loss_logging_threshold = n_batches * 0.8 // 1
     n_loss_samples = 0
     total_loss = 0
     for batch, (X, metadata, labels) in enumerate(dataloader):
+        X, metadata, labels = X.to(device, non_blocking=True), metadata.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         preds = model(X, metadata) # shape: (batch_size, 13)
         loss = loss_fn(preds, labels)
         optimizer.zero_grad()

@@ -16,7 +16,6 @@ dependencies = [
     "pygame>=2.6.0",
     "python-chess>=1.999",
     "python-dotenv>=1.2.2",
-    "reachy-mini[mujoco]>=1.7.3",
     "torch>=2.12.1",
     "torchvision>=0.27.1",
     "wandb>=0.28.0",
@@ -25,6 +24,9 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+]
+robot = [
+    "reachy-mini[mujoco]>=1.8.4",
 ]
 
 [build-system]

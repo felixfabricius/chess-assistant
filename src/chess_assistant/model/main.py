@@ -19,6 +19,8 @@ load_dotenv() # for api keys
 
 @hydra.main(config_path=".", config_name="config", version_base=None)
 def main(config: DictConfig):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
     if config.data.weighting == "inverse_root" and config.note == "":
         config.note = "Weighting: Inverse Root"
     if config.get("debug") and not config.get("prefix"):
@@ -42,17 +44,29 @@ def main(config: DictConfig):
 
     assert config.model in [1, 2]
     model = SquareClassifier() if config.model == 1 else SquareClassifier2()
+    model = model.to(device) # model.to(device) is also in place so would be sufficient
     lowest_loss = float("inf")
-    best_model = None
+    best_model_state = None
     optimizer_state = None
     best_epoch = 0
     
+    dataloader_cfg = config.get("data", {}).get("dataloader", {})
     train_dataloader = create_dataloader(
         split="train",
+        shuffle=True,
         batch_size=config.training.get("batch_size", 64),
-        shuffle=True
+        num_workers = dataloader_cfg.get("num_workers", 0),
+        persistent_workers = dataloader_cfg.get("persistent_workers", False),
+        pin_memory = dataloader_cfg.get("pin_memory", False)
     )
-    val_dataloader = create_dataloader("val", batch_size=64, shuffle=False)
+    val_dataloader = create_dataloader(
+        split="val",
+        shuffle=False,
+        batch_size=config.training.get("batch_size", 64),
+        num_workers = dataloader_cfg.get("num_workers", 0),
+        persistent_workers = dataloader_cfg.get("persistent_workers", False),
+        pin_memory = dataloader_cfg.get("pin_memory", False)
+    )
 
     # Hyperparameters
     lr = config.optimizer.lr
@@ -60,7 +74,7 @@ def main(config: DictConfig):
 
     # 
     if config.data.get("weighting") == "inverse_root":
-        weights = torch.zeros(13, dtype=torch.float32)
+        weights = torch.zeros(13, dtype=torch.float32).to(device)
         csv_path = Path(config.data.get("csv_path"))
         assert csv_path.exists()
         data = pl.read_csv(csv_path).filter(pl.col("setup_split").eq("train"))
@@ -86,14 +100,16 @@ def main(config: DictConfig):
             dataloader=train_dataloader, 
             loss_fn=loss_fn, 
             optimizer=optimizer,
-            debug=config.get("debug", False)
+            debug=config.get("debug", False),
+            device=device
         )
         val_metrics = evaluate(
             model=model, 
             dataloader=val_dataloader, 
             loss_fn=eval_loss_fn, 
             split="val", 
-            csv_path=Path("data/generated/data.csv")
+            csv_path=Path("data/generated/data.csv"),
+            device=device
         )
 
         run.log({"epoch": epoch, **train_metrics, **val_metrics})
@@ -101,8 +117,16 @@ def main(config: DictConfig):
         # Update best model
         if val_metrics["eval/square/avg_loss"] < lowest_loss:
             lowest_loss = val_metrics["eval/square/avg_loss"]
-            best_model = copy.deepcopy(model.state_dict())
+            best_model_state = copy.deepcopy(model.state_dict()) 
             optimizer_state = copy.deepcopy(optimizer.state_dict())
+                # Reason for .to("cpu") here: if device is CUDA, then state_dict()
+                # and the AdamW momentum buffers in optimizer.state_dict()
+                # contain CUDA tensors, which get pickled with their device ifo.
+                # So if in a future script I try to load this checkpoint into my
+                # GPU-less machine, plain torch.load(cache_path) would crash.
+                # Can pass map_location="cpu" to torch.load - THIS WOULD ACTUALLY BE EASIEST.
+                # Also: don't want to write 'best_model = copy.deepcopy(model.to("cpu").state_dict())'
+                # because this would move model in place
             best_epoch = epoch
 
     # Persist the best version of the model
@@ -111,7 +135,7 @@ def main(config: DictConfig):
     torch.save(
         {
             "epoch": best_epoch,
-            "model_state_dict": best_model,
+            "model_state_dict": best_model_state,
             "optimizer_state_dict": optimizer_state
         },
         cache_path
