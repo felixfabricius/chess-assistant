@@ -55,17 +55,17 @@ def main(config: DictConfig):
         split="train",
         shuffle=True,
         batch_size=config.training.get("batch_size", 64),
-        num_workers = dataloader_cfg.get("num_workers", 0),
-        persistent_workers = dataloader_cfg.get("persistent_workers", False),
-        pin_memory = dataloader_cfg.get("pin_memory", False)
+        num_workers=dataloader_cfg.get("num_workers", 0),
+        persistent_workers=dataloader_cfg.get("persistent_workers", False),
+        pin_memory=dataloader_cfg.get("pin_memory", False) and device == torch.device("cuda") 
     )
     val_dataloader = create_dataloader(
         split="val",
         shuffle=False,
         batch_size=config.training.get("batch_size", 64),
-        num_workers = dataloader_cfg.get("num_workers", 0),
-        persistent_workers = dataloader_cfg.get("persistent_workers", False),
-        pin_memory = dataloader_cfg.get("pin_memory", False)
+        num_workers=dataloader_cfg.get("num_workers", 0),
+        persistent_workers=dataloader_cfg.get("persistent_workers", False),
+        pin_memory=dataloader_cfg.get("pin_memory", False) and device == torch.device("cuda") 
     )
 
     # Hyperparameters
