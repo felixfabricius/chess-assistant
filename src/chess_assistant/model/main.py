@@ -93,6 +93,11 @@ def main(config: DictConfig):
     )
 
     epochs = config.training.get("epochs", 1)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=epochs,
+        eta_min=config.get("scheduler", {}).get("eta_min", 1e-6)
+    )
     for epoch in range(1, epochs + 1):
         print(f"\nEpoch {epoch}\n------------------------------")
         train_metrics = train(
@@ -112,12 +117,12 @@ def main(config: DictConfig):
             device=device
         )
 
-        run.log({"epoch": epoch, **train_metrics, **val_metrics})
+        run.log({"epoch": epoch, "lr": optimizer.param_groups[0]["lr"], **train_metrics, **val_metrics})
 
         # Update best model
         if val_metrics["eval/square/avg_loss"] < lowest_loss:
             lowest_loss = val_metrics["eval/square/avg_loss"]
-            best_model_state = copy.deepcopy(model.state_dict()) 
+            best_model_state = copy.deepcopy(model.state_dict())
             optimizer_state = copy.deepcopy(optimizer.state_dict())
                 # Reason for .to("cpu") here: if device is CUDA, then state_dict()
                 # and the AdamW momentum buffers in optimizer.state_dict()
@@ -128,6 +133,8 @@ def main(config: DictConfig):
                 # Also: don't want to write 'best_model = copy.deepcopy(model.to("cpu").state_dict())'
                 # because this would move model in place
             best_epoch = epoch
+
+        scheduler.step()
 
     # Persist the best version of the model
     cache_path = Path(".cache") / f"model_{run.id}.pt"
