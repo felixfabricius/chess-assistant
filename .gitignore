@@ -18,6 +18,7 @@ data/raw_images/*.png
 data/raw_images/*.jpg
 data/raw_images/*.jpeg
 data.tar.gz
+data_ancient.tar.gz
 
 # Run logs
 .cache
