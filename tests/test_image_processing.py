@@ -11,9 +11,11 @@ import pytest
 
 from chess_assistant.image_processing import (
     QuadrantMagnitudeField,
-    bilinear_interp,
-    estimate_vanishing_point,
     Processor,
+    bilinear_interp,
+    compute_square_mask,
+    estimate_vanishing_point,
+    mask_bounding_box,
 )
 
 
@@ -163,3 +165,56 @@ def test_processor_v1_metadata_has_no_v2_geometry():
     assert processor.is_v2 is False
     assert processor.V is None
     assert processor.magnitude_field is None
+
+
+# --------------------------------------------------------------------------------------------
+# mask_bounding_box / compute_square_mask
+# --------------------------------------------------------------------------------------------
+
+def test_mask_bounding_box_margin():
+    pts = np.array([[0, 0], [10, 0], [10, 10], [0, 10]], dtype=np.float64)  # centroid (5, 5)
+    assert mask_bounding_box(pts, margin=1.0) == (0, 0, 10, 10)
+    # 20% expansion about the centroid pushes each corner out by 1 px.
+    assert mask_bounding_box(pts, margin=1.2) == (-1, -1, 11, 11)
+
+
+def test_compute_square_mask_fills_polygon():
+    poly = np.array([[2, 2], [8, 2], [8, 8], [2, 8]], dtype=np.float64)
+    mask = compute_square_mask(poly, (10, 10))
+    assert mask.shape == (10, 10)
+    assert mask.dtype == np.uint8
+    assert set(np.unique(mask)).issubset({0, 1})
+    assert mask[5, 5] == 1  # inside the hull
+    assert mask[0, 0] == 0  # outside the hull
+
+
+# --------------------------------------------------------------------------------------------
+# Processor.cutout (v2)
+# --------------------------------------------------------------------------------------------
+
+def test_processor_v2_cutout_outputs(tmp_path):
+    processor = Processor(_write_v2_metadata(tmp_path), None)
+
+    frame = np.random.default_rng(2).integers(0, 255, (1080, 1920, 3)).astype(np.uint8)
+    img_path = tmp_path / "image.png"
+    cv2.imwrite(str(img_path), frame)
+
+    warped_path = processor.warp(img_path)
+    squares_dir = processor.cutout(warped_path)
+
+    assert sum(1 for d in squares_dir.iterdir() if d.is_dir()) == 64
+
+    tops = {}
+    for sq in ["a1", "e4", "h8", "d5"]:
+        sq_dir = squares_dir / sq
+        arr = np.load(sq_dir / f"{sq}_masked.npy")
+        assert arr.shape == (144, 144, 4)  # letterboxed RGBA
+        assert set(np.unique(arr[..., 3])).issubset({0, 1})  # hard 0/1 mask
+        assert arr[..., 3].max() == 1  # the mask actually covers something
+        meta = json.loads((sq_dir / f"{sq}_metadata.json").read_text())
+        assert "top" in meta and "left" in meta
+        tops[sq] = (meta["top"], meta["left"])
+
+    # Per-square tight crops: different squares have different crop origins (unlike the old
+    # fixed global padding, which gave every square an identical origin/size).
+    assert len(set(tops.values())) > 1

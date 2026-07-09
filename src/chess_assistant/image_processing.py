@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from pathlib import Path
 import cv2
 import numpy as np
@@ -145,6 +146,42 @@ class QuadrantMagnitudeField:
             vals = (self.m_lm, self.m_center, self.m_bm, self.m_bl)
             lu, lv = u * 2, (v - 0.5) * 2
         return bilinear_interp(vals[0], vals[1], vals[2], vals[3], lu, lv)
+
+
+def mask_bounding_box(mask_points: np.ndarray, margin: float = 1.05):
+    """Axis-aligned box of ``mask_points``, expanded by ``margin`` about their centroid.
+
+    Returns ``(x_min, y_min, x_max, y_max)`` as ints (floor/ceil). The caller is expected to
+    clamp this to the canvas.
+    """
+    mask_points = np.asarray(mask_points, dtype=np.float64)
+    centroid = mask_points.mean(axis=0)
+    expanded = centroid + (mask_points - centroid) * margin
+    x_min, y_min = expanded.min(axis=0)
+    x_max, y_max = expanded.max(axis=0)
+    return int(np.floor(x_min)), int(np.floor(y_min)), int(np.ceil(x_max)), int(np.ceil(y_max))
+
+
+def compute_square_mask(mask_polygon: np.ndarray, crop_shape: tuple[int, int]) -> np.ndarray:
+    """Hard 0/1 mask in the crop's own local coordinates (polygon already offset to the crop).
+
+    Isolated on purpose: a future soft-mask version replaces only this function's body, so no
+    caller needs to change. ``crop_shape`` is ``(height, width)``.
+    """
+    mask = np.zeros(crop_shape, dtype=np.uint8)
+    cv2.fillConvexPoly(mask, mask_polygon.astype(np.int32), 1)
+    return mask
+
+
+@dataclass
+class SquareGeometry:
+    """Precomputed per-square geometry in the padded warped frame (frozen per setup)."""
+
+    label: str
+    floor_pts: np.ndarray      # (4, 2) tl, tr, br, bl — the square's own corners
+    ceiling_pts: np.ndarray    # (4, 2) vanishing-point-projected corners, matching floor order
+    mask_polygon: np.ndarray   # (K, 2) convex hull of floor + ceiling
+    bbox: tuple                # (x_min, y_min, x_max, y_max), clamped to the canvas
 
 
 class Processor:
@@ -309,6 +346,7 @@ class Processor:
         self.vp_residual = None
         self.magnitude_field = None
         self.square_geometry = None
+        self.square_labels = self._compute_square_labels()
         if is_v2:
             base_center = np.array(
                 [padding["left"] + board_size / 2.0, padding["up"] + board_size / 2.0]
@@ -340,6 +378,85 @@ class Processor:
                 m_bl=float(corner_mags[3]),
                 m_center=float(np.linalg.norm(ext_center - base_center)),
             )
+            self.square_geometry = self._build_square_geometry()
+
+    def _compute_square_labels(self) -> dict:
+        """Map each ``(i, j)`` grid cell (row from top, col from left) to its square label.
+
+        Same mapping the v1 cutout computed inline; depends only on which board corner sits at
+        the image's top-left (``self.corner_map["tl"]``).
+        """
+        files = ["a", "b", "c", "d", "e", "f", "g", "h"]
+        ranks = [str(i) for i in range(1, 9)]
+        label_map = {
+            "a8": [{i: ranks[-(i + 1)] for i in range(8)}, {j: files[j] for j in range(8)}],
+            "a1": [{i: files[i] for i in range(8)}, {j: ranks[j] for j in range(8)}],
+            "h1": [{i: ranks[i] for i in range(8)}, {j: files[-(j + 1)] for j in range(8)}],
+            "h8": [{i: files[-(i + 1)] for i in range(8)}, {j: ranks[-(j + 1)] for j in range(8)}],
+        }
+        tl = self.corner_map["tl"]
+        is_reverse = tl in ["a1", "h8"]
+        lm = label_map[tl]
+        return {
+            (i, j): (lm[1][j] + lm[0][i]) if not is_reverse else (lm[0][i] + lm[1][j])
+            for i in range(8)
+            for j in range(8)
+        }
+
+    def _build_square_geometry(self) -> dict:
+        """Precompute every square's mask polygon + crop box once, in the padded warped frame.
+
+        Per floor corner: direction = unit vector toward ``self.V``; magnitude = the quadrant
+        field at that corner's board coord ``(u, v)``; ceiling = corner + direction * magnitude.
+        The mask polygon is the convex hull of the 4 floor + 4 ceiling corners; the crop box is
+        that hull's (margin-expanded) bounding box, clamped to the canvas.
+        """
+        square_size = self.board_size // 8
+        pl, pu = self.padding["left"], self.padding["up"]
+        board_size = self.board_size
+        size_x, size_y = self.image_size
+
+        geometry: dict[str, SquareGeometry] = {}
+        for i in range(8):
+            for j in range(8):
+                floor = np.array(
+                    [
+                        [pl + j * square_size, pu + i * square_size],
+                        [pl + (j + 1) * square_size, pu + i * square_size],
+                        [pl + (j + 1) * square_size, pu + (i + 1) * square_size],
+                        [pl + j * square_size, pu + (i + 1) * square_size],
+                    ],
+                    dtype=np.float64,
+                )
+                ceiling = np.empty_like(floor)
+                for k, corner in enumerate(floor):
+                    u = (corner[0] - pl) / board_size
+                    v = (corner[1] - pu) / board_size
+                    magnitude = self.magnitude_field(u, v)
+                    direction = self.V - corner
+                    norm = np.linalg.norm(direction)
+                    direction = direction / norm if norm > 0 else np.zeros(2)
+                    ceiling[k] = corner + direction * magnitude
+
+                hull = cv2.convexHull(
+                    np.vstack([floor, ceiling]).astype(np.float32)
+                ).reshape(-1, 2)
+                x_min, y_min, x_max, y_max = mask_bounding_box(hull)
+                bbox = (
+                    max(0, x_min),
+                    max(0, y_min),
+                    min(size_x, x_max),
+                    min(size_y, y_max),
+                )
+                label = self.square_labels[(i, j)]
+                geometry[label] = SquareGeometry(
+                    label=label,
+                    floor_pts=floor,
+                    ceiling_pts=ceiling,
+                    mask_polygon=hull,
+                    bbox=bbox,
+                )
+        return geometry
 
     def warp(self, image_path: Path) -> Path:
         image = cv2.imread(image_path)
@@ -412,6 +529,13 @@ class Processor:
 
         """
         warped_image = cv2.imread(warped_image_path)
+
+        # v2 calibration: per-square convex-hull mask + tight crop from the precomputed
+        # geometry. v1 metadata (no square_geometry) falls through to the legacy path below.
+        if self.square_geometry is not None:
+            return self._cutout_v2(warped_image, warped_image_path.parent / "squares")
+
+        # --- Legacy v1 path: fixed global padding + hard axis-aligned rectangle mask ---
         # We loop over the pixel coordinates of the bottom left corner of different squares.
         # We start at the bottom left corner of the top-left square.
         # Then via the outer for-loop we increment the vertical coordinate.
@@ -560,6 +684,59 @@ class Processor:
                 # Save square metadata
                 with open(square_dir / f"{square_label}_metadata.json", "w", encoding="utf-8") as f:
                     json.dump(square_metadata, f, indent=2)
+
+        return squares_dir
+
+    def _cutout_v2(self, warped_image, squares_dir):
+        """Per-square crop + hard convex-hull mask from the precomputed square geometry.
+
+        Each square's crop is the tight bounding box of its own mask polygon (variable size
+        per square); the mask polygon is translated into the crop's local frame before being
+        filled. The letterbox step (unchanged) handles the variably-sized crops.
+        """
+        squares_dir.mkdir(exist_ok=True)
+        for label, geom in self.square_geometry.items():
+            x_min, y_min, x_max, y_max = geom.bbox
+            square_cutout = warped_image[y_min:y_max, x_min:x_max]
+
+            offset = np.array([x_min, y_min])
+            local_polygon = geom.mask_polygon - offset
+            mask = compute_square_mask(local_polygon, square_cutout.shape[:2])
+            square_cutout_masked = np.concatenate([square_cutout, mask[:, :, None]], axis=2)
+            square_cutout_masked = letterbox(
+                square_cutout_masked, (self.square_cutout_size, self.square_cutout_size)
+            )
+
+            # Annotated crop (BGR): convex-hull outline + the square's own floor-corner dots.
+            square_cutout_annotated = square_cutout.copy()
+            cv2.polylines(
+                square_cutout_annotated,
+                [local_polygon.astype(np.int32)],
+                isClosed=True,
+                color=(0, 255, 0),
+                thickness=1,
+            )
+            for x_local, y_local in geom.floor_pts - offset:
+                cv2.circle(
+                    square_cutout_annotated,
+                    (int(round(x_local)), int(round(y_local))),
+                    4,
+                    (0, 0, 255),
+                    -1,
+                )
+
+            square_dir = squares_dir / label
+            square_dir.mkdir(exist_ok=True)
+            square_metadata = {"top": int(y_min), "left": int(x_min)}
+
+            cv2.imwrite(str(square_dir / f"{label}.png"), square_cutout[:, :, :3])
+            cv2.imwrite(str(square_dir / f"{label}_annotated.png"), square_cutout_annotated)
+            square_cutout_masked[:, :, :3] = cv2.cvtColor(
+                square_cutout_masked[:, :, :3], cv2.COLOR_BGR2RGB
+            )
+            np.save(str(square_dir / f"{label}_masked.npy"), square_cutout_masked)
+            with open(square_dir / f"{label}_metadata.json", "w", encoding="utf-8") as f:
+                json.dump(square_metadata, f, indent=2)
 
         return squares_dir
 
