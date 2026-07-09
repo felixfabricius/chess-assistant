@@ -110,11 +110,13 @@ def board_to_piece_map(board: chess.Board) -> dict[str, str]:
 
 
 def square_image_path(squares_dir: Path, square: str) -> Path:
-    """Path to the cutout image, e.g. ``squares/e4/e4.png``.
+    """Path recorded in the CSV for a square, e.g. ``squares/e4/e4_annotated.png``.
 
-    Matches the nested structure produced by ``Processor.cutout``.
+    Points at the annotated cutout (the plain ``<square>.png`` is no longer written). The model
+    input — ``<square>_masked.npy`` — lives in the same per-square directory and is derived from
+    this path's parent by the training loader.
     """
-    return Path(squares_dir) / square / f"{square}.png"
+    return Path(squares_dir) / square / f"{square}_annotated.png"
 
 
 def square_annotated_image_path(squares_dir: Path, square: str) -> Path:

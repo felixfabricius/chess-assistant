@@ -671,8 +671,7 @@ class Processor:
                     "left": left
                 }
 
-                # Save cutout
-                cv2.imwrite(str(square_dir / f"{square_label}.png") , square_cutout[:,:,:3])
+                # Save cutout (annotated PNG + masked npy; the plain PNG is intentionally dropped)
                 cv2.imwrite(str(square_dir / f"{square_label}_annotated.png"), square_cutout_annotated)
                 # Save uncompressed numpy array which also contains the mask
                 square_cutout_masked[:, :, :3] = cv2.cvtColor(
@@ -729,7 +728,6 @@ class Processor:
             square_dir.mkdir(exist_ok=True)
             square_metadata = {"top": int(y_min), "left": int(x_min)}
 
-            cv2.imwrite(str(square_dir / f"{label}.png"), square_cutout[:, :, :3])
             cv2.imwrite(str(square_dir / f"{label}_annotated.png"), square_cutout_annotated)
             square_cutout_masked[:, :, :3] = cv2.cvtColor(
                 square_cutout_masked[:, :, :3], cv2.COLOR_BGR2RGB

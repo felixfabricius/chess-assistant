@@ -52,9 +52,9 @@ class squareDataset(Dataset):
         # generated the data (currently Windows), so it may contain "\" separators.
         # Parse it as a Windows path first so it resolves correctly on Linux too.
         raw_path = PureWindowsPath(self.data[idx, "square_image_path"]).as_posix()
+        # The CSV stores the annotated-image path; the model input is the 4-channel masked
+        # array saved alongside it in the same per-square directory.
         img_path = Path(raw_path).parent / f"{square}_masked.npy"
-            # TODO: remove this above workaround. Necessary at the moment because the
-            # wrong image paths are saved in the csv.
             # TODO: not sure this way of accessing polars row item is robust to having no rows with that split.
         image = np.load(img_path)
 

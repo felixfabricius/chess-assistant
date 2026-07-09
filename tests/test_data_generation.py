@@ -51,7 +51,7 @@ def test_board_to_piece_map_covers_all_squares():
 
 def test_square_image_paths_are_nested_correctly(tmp_path):
     squares_dir = tmp_path / "squares"
-    assert square_image_path(squares_dir, "e4") == squares_dir / "e4" / "e4.png"
+    assert square_image_path(squares_dir, "e4") == squares_dir / "e4" / "e4_annotated.png"
     assert (
         square_annotated_image_path(squares_dir, "e4")
         == squares_dir / "e4" / "e4_annotated.png"
@@ -86,7 +86,7 @@ def test_build_square_rows_shape_and_labels(tmp_path):
     assert by_square["e1"]["label"] == "K"
     assert by_square["e4"]["label"] == "empty"
     assert by_square["e1"]["square_image_path"] == str(
-        squares_dir / "e1" / "e1.png"
+        squares_dir / "e1" / "e1_annotated.png"
     )
     # None values are serialised as empty strings for the CSV.
     assert by_square["e1"]["previous_board_fen"] == ""
