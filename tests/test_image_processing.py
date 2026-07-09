@@ -10,8 +10,8 @@ import numpy as np
 import pytest
 
 from chess_assistant.image_processing import (
-    QuadrantMagnitudeField,
     Processor,
+    QuadrantField,
     bilinear_interp,
     compute_square_mask,
     estimate_vanishing_point,
@@ -63,11 +63,11 @@ def test_bilinear_interp_midpoints():
 
 
 # --------------------------------------------------------------------------------------------
-# QuadrantMagnitudeField
+# QuadrantField
 # --------------------------------------------------------------------------------------------
 
 def test_quadrant_field_returns_measured_values_at_nodes():
-    f = QuadrantMagnitudeField(m_tl=10, m_tr=20, m_br=30, m_bl=40, m_center=100)
+    f = QuadrantField(m_tl=10, m_tr=20, m_br=30, m_bl=40, m_center=100)
     assert f(0, 0) == pytest.approx(10)
     assert f(1, 0) == pytest.approx(20)
     assert f(1, 1) == pytest.approx(30)
@@ -76,7 +76,7 @@ def test_quadrant_field_returns_measured_values_at_nodes():
 
 
 def test_quadrant_field_edge_midpoints_are_corner_means():
-    f = QuadrantMagnitudeField(m_tl=10, m_tr=20, m_br=30, m_bl=40, m_center=100)
+    f = QuadrantField(m_tl=10, m_tr=20, m_br=30, m_bl=40, m_center=100)
     assert f(0.5, 0.0) == pytest.approx(15)  # top mid = (tl+tr)/2
     assert f(1.0, 0.5) == pytest.approx(25)  # right mid = (tr+br)/2
     assert f(0.5, 1.0) == pytest.approx(35)  # bottom mid = (br+bl)/2
@@ -84,12 +84,26 @@ def test_quadrant_field_edge_midpoints_are_corner_means():
 
 
 def test_quadrant_field_continuous_across_boundary():
-    f = QuadrantMagnitudeField(m_tl=10, m_tr=20, m_br=30, m_bl=40, m_center=100)
+    f = QuadrantField(m_tl=10, m_tr=20, m_br=30, m_bl=40, m_center=100)
     eps = 1e-6
     # Straddle the u=0.5 seam in the top half.
     assert f(0.5 - eps, 0.25) == pytest.approx(f(0.5 + eps, 0.25), abs=1e-3)
     # Straddle the v=0.5 seam in the left half.
     assert f(0.25, 0.5 - eps) == pytest.approx(f(0.25, 0.5 + eps), abs=1e-3)
+
+
+def test_quadrant_field_supports_vectors():
+    # Node values are 2D displacement vectors; interpolation is componentwise.
+    f = QuadrantField(
+        m_tl=np.array([1.0, 2.0]),
+        m_tr=np.array([3.0, 4.0]),
+        m_br=np.array([5.0, 6.0]),
+        m_bl=np.array([7.0, 8.0]),
+        m_center=np.array([4.0, 5.0]),  # == corner average -> reduces to plain bilinear
+    )
+    assert np.allclose(f(0, 0), [1, 2])
+    assert np.allclose(f(1, 1), [5, 6])
+    assert np.allclose(f(0.5, 0.5), [4, 5])  # plain-bilinear centre
 
 
 # --------------------------------------------------------------------------------------------
@@ -151,10 +165,11 @@ def test_processor_v2_builds_vanishing_point_and_field(tmp_path):
     ).reshape(2)
     assert np.allclose(processor.V, expected_V, atol=1.0)
 
-    # Magnitude field returns the measured (positive) corner magnitudes at the board corners.
-    field = processor.magnitude_field
+    # The extension field returns finite 2D displacement vectors.
     for u, v in [(0, 0), (1, 0), (1, 1), (0, 1), (0.5, 0.5)]:
-        assert field(u, v) > 0.0
+        disp = processor.extension_field(u, v)
+        assert np.asarray(disp).shape == (2,)
+        assert np.all(np.isfinite(disp))
 
 
 def test_processor_v1_metadata_has_no_v2_geometry():
@@ -164,7 +179,45 @@ def test_processor_v1_metadata_has_no_v2_geometry():
     )
     assert processor.is_v2 is False
     assert processor.V is None
-    assert processor.magnitude_field is None
+    assert processor.extension_field is None
+
+
+def test_extension_follows_clicks_even_when_vanishing_point_flips():
+    # Divergent piece-height rays: the least-squares V lands on the wrong side, so the OLD
+    # `unit(V - corner)` direction would point away from the clicked tops. The displacement
+    # field must still reproduce the measured extensions exactly at the corners.
+    from chess_assistant.calibration import infer_camera_natural_corner_order
+
+    actual = {"a8": [500, 800], "h8": [1400, 800], "h1": [1400, 300], "a1": [500, 300]}
+    extended = {"a8": [380, 720], "h8": [1520, 720], "h1": [1520, 230], "a1": [380, 230]}
+    meta = {
+        "actual_corners_px": actual,
+        "extended_corners_px": extended,
+        "extended_center_px": [950, 515],
+        "camera_natural_orientation": infer_camera_natural_corner_order(actual),
+    }
+    p = Processor(meta, None)
+    order = meta["camera_natural_orientation"]["order"]
+
+    dst = np.array(
+        [
+            [p.padding["left"], p.padding["up"]],
+            [p.padding["left"] + p.board_size, p.padding["up"]],
+            [p.padding["left"] + p.board_size, p.padding["up"] + p.board_size],
+            [p.padding["left"], p.padding["up"] + p.board_size],
+        ],
+        dtype=np.float64,
+    )
+    src_ext = np.array([extended[order[q]] for q in ["tl", "tr", "br", "bl"]], np.float32)
+    ext_w = cv2.perspectiveTransform(src_ext.reshape(4, 1, 2), p.matrix).reshape(4, 2)
+    measured = ext_w - dst  # measured warped displacements, tl, tr, br, bl
+
+    # This config genuinely triggers the flip: V is on the opposite vertical side of the clicks.
+    assert np.sign((p.V - dst[0])[1]) != np.sign(measured[0][1])
+
+    # The field reproduces the measured displacement (direction + magnitude) at each corner.
+    for idx, (u, v) in enumerate([(0, 0), (1, 0), (1, 1), (0, 1)]):
+        assert np.allclose(p.extension_field(u, v), measured[idx], atol=1e-6)
 
 
 # --------------------------------------------------------------------------------------------

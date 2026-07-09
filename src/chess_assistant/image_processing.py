@@ -108,14 +108,16 @@ def bilinear_interp(m_tl, m_tr, m_br, m_bl, u, v):
     return top * (1 - v) + bottom * v
 
 
-class QuadrantMagnitudeField:
-    """Per-square extension magnitude over board coords ``(u, v) in [0,1]^2``.
+class QuadrantField:
+    """Bilinear field over board coords ``(u, v) in [0,1]^2`` from 4 corner + 1 centre values.
 
-    Four corner + one centre magnitudes are measured; the four edge midpoints are derived as
-    the mean of their two adjacent corners (matching what a plain bilinear patch predicts along
-    an edge). The board is split into NW/NE/SE/SW quadrant patches (each bounded by one real
-    corner, the centre, and two derived edge midpoints); a query ``(u, v)`` is dispatched to its
-    quadrant, remapped to that quadrant's local ``[0,1]^2`` and bilinearly interpolated.
+    Node values may be scalars or numpy vectors (used here for 2D extension displacements —
+    ``bilinear_interp`` operates componentwise). The four edge midpoints are derived as the mean
+    of their two adjacent corners (matching what a plain bilinear patch predicts along an edge).
+    The board is split into NW/NE/SE/SW quadrant patches (each bounded by one real corner, the
+    centre, and two derived edge midpoints); a query ``(u, v)`` is dispatched to its quadrant,
+    remapped to that quadrant's local ``[0,1]^2`` and bilinearly interpolated. When the centre
+    value equals the corner average, the field reduces exactly to a plain bilinear patch.
     """
 
     def __init__(self, m_tl, m_tr, m_br, m_bl, m_center):
@@ -345,13 +347,16 @@ class Processor:
                 (width, height),
             )
 
-        # Perspective geometry (v2 calibration only): vanishing point V and the quadrant
-        # magnitude field, both expressed in the padded warped frame that cutout() crops from
-        # (so V and the per-square floor corners share one frame, no conversion needed).
+        # Perspective geometry (v2 calibration only): the per-square extension is a field of
+        # measured base->extended displacement VECTORS, interpolated across the board. Working
+        # directly with the measured displacements (rather than pointing each corner toward a
+        # single least-squares vanishing point) reproduces the clicked piece-tops exactly at the
+        # 5 measured points and cannot flip when the piece-height rays are near-parallel/noisy.
+        # V/vp_residual are still computed as a fit-quality diagnostic (logged), not for geometry.
         self.is_v2 = is_v2
         self.V = None
         self.vp_residual = None
-        self.magnitude_field = None
+        self.extension_field = None
         self.square_geometry = None
         self.square_labels = self._compute_square_labels()
         if is_v2:
@@ -376,14 +381,14 @@ class Processor:
 
             self.V, self.vp_residual = estimate_vanishing_point(base_pts, ext_pts)
 
-            # Extension magnitudes at the 5 measured points (corners in tl, tr, br, bl order).
-            corner_mags = np.linalg.norm(ext_corners - dst.astype(np.float64), axis=1)
-            self.magnitude_field = QuadrantMagnitudeField(
-                m_tl=float(corner_mags[0]),
-                m_tr=float(corner_mags[1]),
-                m_br=float(corner_mags[2]),
-                m_bl=float(corner_mags[3]),
-                m_center=float(np.linalg.norm(ext_center - base_center)),
+            # Measured extension displacement vectors (padded warped frame), tl, tr, br, bl.
+            corner_disp = ext_corners - dst.astype(np.float64)  # (4, 2)
+            self.extension_field = QuadrantField(
+                m_tl=corner_disp[0],
+                m_tr=corner_disp[1],
+                m_br=corner_disp[2],
+                m_bl=corner_disp[3],
+                m_center=ext_center - base_center,
             )
             self.square_geometry = self._build_square_geometry()
 
@@ -439,11 +444,8 @@ class Processor:
                 for k, corner in enumerate(floor):
                     u = (corner[0] - pl) / board_size
                     v = (corner[1] - pu) / board_size
-                    magnitude = self.magnitude_field(u, v)
-                    direction = self.V - corner
-                    norm = np.linalg.norm(direction)
-                    direction = direction / norm if norm > 0 else np.zeros(2)
-                    ceiling[k] = corner + direction * magnitude
+                    # Extension = interpolated measured displacement (toward the clicked tops).
+                    ceiling[k] = corner + self.extension_field(u, v)
 
                 hull = cv2.convexHull(
                     np.vstack([floor, ceiling]).astype(np.float32)
