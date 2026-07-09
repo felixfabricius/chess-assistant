@@ -4,6 +4,8 @@ import numpy as np
 from omegaconf import OmegaConf
 import json
 
+from chess_assistant.camera_utils import build_undistort_maps, undistort
+
 def letterbox(
     img: np.ndarray,
     target_size: tuple[int, int],
@@ -192,8 +194,26 @@ class Processor:
         self.image_size = (size_x, size_y)
         self.matrix = matrix
 
+        # Lens undistortion maps, built once per setup from the intrinsics cached in the
+        # calibration metadata (v2 calibrations only). When absent (v1 metadata), warp()
+        # behaves exactly as before — no undistortion.
+        self.undistort_map1 = None
+        self.undistort_map2 = None
+        camera_intrinsics = metadata.get("camera_intrinsics")
+        if camera_intrinsics:
+            width, height = camera_intrinsics["image_size"]
+            self.undistort_map1, self.undistort_map2 = build_undistort_maps(
+                np.asarray(camera_intrinsics["K"], dtype=np.float64),
+                np.asarray(camera_intrinsics["D"], dtype=np.float64),
+                (width, height),
+            )
+
     def warp(self, image_path: Path) -> Path:
         image = cv2.imread(image_path)
+        # Undistort in memory before warping. The raw frame on disk is never modified, and no
+        # undistorted copy of a full frame is written out (only the warped result is saved).
+        if self.undistort_map1 is not None:
+            image = undistort(image, self.undistort_map1, self.undistort_map2)
         warped_image = cv2.warpPerspective(image, self.matrix, self.image_size)
         warped_image_path = image_path.parent / (str(image_path.stem) + "_warped.png")
         cv2.imwrite(str(warped_image_path), warped_image)
