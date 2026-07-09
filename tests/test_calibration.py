@@ -12,8 +12,7 @@ from chess_assistant.calibration import (
     build_inspector_calibration,
     compute_inspector_results,
     derive_center_px,
-    render_review_overlay,
-    render_square_inspector,
+    render_full_overlay,
 )
 
 
@@ -72,6 +71,25 @@ def test_build_calibration_metadata_preserves_and_adds():
     assert len(md["camera_intrinsics"]["D"]) == 12
     assert md["camera_natural_orientation"]["order"]["tl"] in {"a1", "a8", "h8", "h1"}
     assert md["raw_image_path"] == "setup/raw.png"
+    assert md["center_measured"] is True  # defaults to measured
+
+
+def test_build_calibration_metadata_records_unmeasured_center():
+    actual = {"a8": [700, 300], "h8": [1220, 300], "h1": [1500, 800], "a1": [420, 800]}
+    extended = {"a8": [690, 250], "h8": [1230, 250], "h1": [1470, 760], "a1": [440, 760]}
+    interpolated_center = list(np.mean([extended[k] for k in extended], axis=0))
+    md = build_calibration_metadata(
+        existing={},
+        actual_corners_px=actual,
+        extended_corners_px=extended,
+        extended_center_px=interpolated_center,
+        K=np.eye(3),
+        D=np.zeros(12),
+        image_size=(1920, 1080),
+        center_measured=False,
+    )
+    assert md["center_measured"] is False
+    assert md["extended_center_px"] == interpolated_center
 
 
 def test_build_calibration_metadata_round_trips_through_processor():
@@ -121,26 +139,27 @@ def test_build_inspector_calibration_keys():
     assert calib["extended_center_px"] == extended["center"]
 
 
-def test_compute_inspector_results_shape():
+def test_compute_inspector_results_camera_frame_shape():
     base, extended, _ = _base_and_extended_points()
     calib = build_inspector_calibration(base, extended)
-    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
-    results = compute_inspector_results(frame, calib, None)
+    results = compute_inspector_results(calib, None)
     assert len(results) == 64
     for r in results:
-        assert r.floor_local.shape == (4, 2)
-        assert r.ceiling_local.shape == (4, 2)
-        assert r.crop.ndim == 3
+        assert r.floor_cam.shape == (4, 2)
+        assert r.ceiling_cam.shape == (4, 2)
+        assert r.bbox_cam.shape == (4, 2)
 
 
-def test_render_helpers_produce_images():
+def test_render_full_overlay_produces_frame_shaped_image():
     base, extended, center_base = _base_and_extended_points()
     calib = build_inspector_calibration(base, extended)
     frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    results = compute_inspector_results(calib, None)
 
-    results = compute_inspector_results(frame, calib, None)
-    view = render_square_inspector(results[10], size=200)
-    assert view.ndim == 3 and max(view.shape[:2]) == 200
+    plain = render_full_overlay(frame, base, center_base, extended, highlight=None)
+    assert plain.shape == frame.shape
 
-    overlay = render_review_overlay(frame, base, center_base, extended)
-    assert overlay.shape == frame.shape
+    highlighted = render_full_overlay(frame, base, center_base, extended, highlight=results[10])
+    assert highlighted.shape == frame.shape
+    # The highlight actually draws something on the frame.
+    assert not np.array_equal(plain, highlighted)

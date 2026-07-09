@@ -154,6 +154,7 @@ def _log_calibration_summary(calibration_data: dict, config_path) -> None:
 def calibrate(
     setup_dir: Path = Path("data") / "raw_images",
     config_path="config.yaml",
+    annotate_center: bool = False,
 ) -> dict | None:
     from reachy_mini import ReachyMini
 
@@ -200,7 +201,9 @@ def calibrate(
                 undistorted, K, D, image_size = undistort_reference_frame(frozen_frame, setup_dir)
                 cv2.destroyWindow("Reachy board view")
 
-                collected = CalibrationUI(undistorted, config_path).run()
+                collected = CalibrationUI(
+                    undistorted, config_path, annotate_center=annotate_center
+                ).run()
                 if collected is None:
                     cv2.destroyAllWindows()
                     return None
@@ -219,6 +222,7 @@ def calibrate(
                     D=D,
                     image_size=image_size,
                     raw_image_path=raw_image_path,
+                    center_measured=annotate_center,
                 )
 
                 with metadata_path.open("w", encoding="utf-8") as f:
@@ -346,12 +350,15 @@ def build_calibration_metadata(
     image_size,
     board_size: int = 400,
     raw_image_path=None,
+    center_measured: bool = True,
 ) -> dict:
     """Assemble versioned (v2) calibration metadata, preserving any pre-existing fields.
 
     Mirrors the ``annotate_existing`` idiom: spread ``**existing`` first, then add/override
     only the new fields. ``center_px`` is derived from the homography (not a click); the scaled
     camera intrinsics are cached so the batch/gameplay never re-fetch them from reachy_mini.
+    ``center_measured`` records whether ``extended_center_px`` was clicked (a real central piece)
+    or interpolated from the corners; either way it is stored so ``Processor`` reads one field.
     """
     order_info = infer_camera_natural_corner_order(actual_corners_px)
     metadata = {
@@ -363,6 +370,7 @@ def build_calibration_metadata(
         "extended_corner_order": LABEL_ORDER,
         "extended_corners_px": extended_corners_px,
         "extended_center_px": list(extended_center_px),
+        "center_measured": bool(center_measured),
         "center_px": derive_center_px(actual_corners_px, order_info["order"], board_size),
         "camera_intrinsics": {
             "K": np.asarray(K, dtype=float).tolist(),
@@ -410,12 +418,12 @@ _DRAG_RADIUS = 14
 
 @dataclass
 class SquareResult:
-    """One square's inspector view: crop pixels + cuboid corners in crop-local coordinates."""
+    """One square's inspector geometry, inverse-warped to the camera (undistorted) frame."""
 
     label: str
-    crop: np.ndarray
-    floor_local: np.ndarray    # (4, 2)
-    ceiling_local: np.ndarray  # (4, 2)
+    floor_cam: np.ndarray    # (4, 2)
+    ceiling_cam: np.ndarray  # (4, 2)
+    bbox_cam: np.ndarray     # (4, 2) crop bounding-box corners
 
 
 def build_inspector_calibration(base_points: dict, extended_points: dict) -> dict:
@@ -428,56 +436,70 @@ def build_inspector_calibration(base_points: dict, extended_points: dict) -> dic
     }
 
 
-def compute_inspector_results(frame, calibration_dict, config_path="config.yaml") -> list:
-    """Warp the (undistorted) frame and build a SquareResult per square (64), in SQUARES order.
+def compute_inspector_results(calibration_dict, config_path="config.yaml") -> list:
+    """Per-square cuboid + crop box, inverse-warped to the camera frame (64, in SQUARES order).
 
-    Pure/headless (no cv2 GUI); runs in a background thread during the review step.
+    Pure/headless (no cv2 GUI); runs in a background thread during review so each square's box
+    can be drawn directly on the full undistorted frame the user clicked on.
     """
     from chess_assistant.image_processing import Processor
 
     processor = Processor(calibration_dict, config_path)
-    warped = cv2.warpPerspective(frame, processor.matrix, processor.image_size)
+    inv = np.linalg.inv(processor.matrix)
+
+    def to_camera(pts):
+        return cv2.perspectiveTransform(
+            np.asarray(pts, dtype=np.float32).reshape(-1, 1, 2), inv
+        ).reshape(-1, 2)
+
     results = []
     for label in SQUARES:
         geom = processor.square_geometry[label]
         x_min, y_min, x_max, y_max = geom.bbox
-        offset = np.array([x_min, y_min])
+        bbox = np.array(
+            [[x_min, y_min], [x_max, y_min], [x_max, y_max], [x_min, y_max]], dtype=np.float64
+        )
         results.append(
             SquareResult(
                 label=label,
-                crop=warped[y_min:y_max, x_min:x_max].copy(),
-                floor_local=geom.floor_pts - offset,
-                ceiling_local=geom.ceiling_pts - offset,
+                floor_cam=to_camera(geom.floor_pts),
+                ceiling_cam=to_camera(geom.ceiling_pts),
+                bbox_cam=to_camera(bbox),
             )
         )
     return results
 
 
-def _draw_cuboid(canvas, floor, ceiling):
+def _draw_cuboid(
+    canvas,
+    floor,
+    ceiling,
+    floor_color=_BASE_COLOR,
+    ceiling_color=_CEILING_COLOR,
+    wall_color=_WALL_COLOR,
+    thickness=1,
+):
     """Thin cuboid wireframe (floor quad + ceiling quad + 4 walls), no fill."""
     floor = np.asarray(floor).astype(np.int32)
     ceiling = np.asarray(ceiling).astype(np.int32)
-    cv2.polylines(canvas, [floor], True, _BASE_COLOR, 1)
-    cv2.polylines(canvas, [ceiling], True, _CEILING_COLOR, 1)
+    cv2.polylines(canvas, [floor], True, floor_color, thickness)
+    cv2.polylines(canvas, [ceiling], True, ceiling_color, thickness)
     for f, c in zip(floor, ceiling):
-        cv2.line(canvas, tuple(f), tuple(c), _WALL_COLOR, 1)
+        cv2.line(canvas, tuple(f), tuple(c), wall_color, thickness)
     return canvas
 
 
-def render_square_inspector(result: SquareResult, size: int = 320) -> np.ndarray:
-    """Upscale a square's crop and draw its cuboid wireframe on top (crop pixels stay visible)."""
-    crop = result.crop
-    if crop is None or crop.size == 0:
-        crop = np.zeros((10, 10, 3), dtype=np.uint8)
-    scale = size / max(crop.shape[0], crop.shape[1])
-    disp = cv2.resize(
-        crop,
-        (max(1, int(crop.shape[1] * scale)), max(1, int(crop.shape[0] * scale))),
-        interpolation=cv2.INTER_NEAREST,
-    )
-    _draw_cuboid(disp, result.floor_local * scale, result.ceiling_local * scale)
-    cv2.putText(disp, result.label, (6, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-    return disp
+def _wheel_direction(flags) -> int:
+    """+1 / -1 / 0 from an EVENT_MOUSEWHEEL ``flags`` value (this OpenCV build lacks
+    ``cv2.getMouseWheelDelta``, so fall back to the signed high 16 bits of ``flags``)."""
+    getter = getattr(cv2, "getMouseWheelDelta", None)
+    if getter is not None:
+        delta = getter(flags)
+    else:
+        delta = (int(flags) >> 16) & 0xFFFF
+        if delta >= 0x8000:
+            delta -= 0x10000
+    return 1 if delta > 0 else -1 if delta < 0 else 0
 
 
 def render_review_overlay(frame, base_points, center_base, extended_points) -> np.ndarray:
@@ -510,18 +532,45 @@ def render_review_overlay(frame, base_points, center_base, extended_points) -> n
     return img
 
 
-class CalibrationUI:
-    """Interactive 5-point calibration collector on an already-undistorted frame.
+def render_full_overlay(frame, base_points, center_base, extended_points, highlight=None):
+    """Review overlay, plus (if given) one square's cuboid + crop box highlighted on the frame."""
+    img = render_review_overlay(frame, base_points, center_base, extended_points)
+    if highlight is not None:
+        _draw_cuboid(
+            img,
+            highlight.floor_cam,
+            highlight.ceiling_cam,
+            floor_color=(0, 255, 255),
+            ceiling_color=(255, 0, 255),
+            wall_color=(255, 255, 0),
+            thickness=2,
+        )
+        cv2.polylines(img, [highlight.bbox_cam.astype(np.int32)], True, (255, 255, 255), 1)
+        anchor = highlight.floor_cam.mean(axis=0)
+        cv2.putText(
+            img, highlight.label, (int(anchor[0]) - 12, int(anchor[1]) + 4),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2,
+        )
+    return img
 
-    Flow: click 4 base corners -> click 5 extended points (4 corners + centre) -> a review step
-    with drag-to-correct and a background per-square mask inspector. ``run()`` returns
-    ``(base_points, extended_points)`` or ``None`` on abort.
+
+class CalibrationUI:
+    """Interactive calibration collector on an already-undistorted frame.
+
+    Flow: click 4 base corners -> click the extended points (4 corners, plus the centre only if
+    ``annotate_center``) -> a review step, drawn on the full frame, with drag-to-correct and a
+    scrollable per-square box inspector (`i` toggles it). ``run()`` returns
+    ``(base_points, extended_points_with_center)`` or ``None`` on abort. When ``annotate_center``
+    is False the extended centre is the bilinear interpolation (average) of the 4 extended
+    corners and is not independently draggable — it tracks the corners.
     """
 
-    def __init__(self, frame, config_path="config.yaml", window_name="Calibration"):
+    def __init__(self, frame, config_path="config.yaml", window_name="Calibration",
+                 annotate_center=False):
         self.frame = frame
         self.config_path = config_path
         self.window_name = window_name
+        self.annotate_center = annotate_center
         self.base_points: dict[str, list[int]] = {}
         self.extended_points: dict[str, list[int]] = {}
         self.selected = None
@@ -532,22 +581,25 @@ class CalibrationUI:
         self.show_inspector = False
 
     def run(self):
+        ext_labels = EXTENDED_LABELS if self.annotate_center else BASE_CORNER_LABELS
+        ext_title = (
+            "extended points (corners then centre)" if self.annotate_center
+            else "extended board corners"
+        )
         while True:
             self.base_points, self.extended_points = {}, {}
-            self.show_inspector = False
+            self.show_inspector, self.inspector_index = False, 0
             if not self._collect(self.base_points, BASE_CORNER_LABELS, "actual board corners", _BASE_COLOR):
                 cv2.destroyWindow(self.window_name)
                 return None
-            if not self._collect(
-                self.extended_points, EXTENDED_LABELS, "extended points (corners then centre)", _EXTENDED_COLOR
-            ):
+            if not self._collect(self.extended_points, ext_labels, ext_title, _EXTENDED_COLOR):
                 cv2.destroyWindow(self.window_name)
                 return None
             outcome = self._review()
             if outcome == "retry":
                 continue
             cv2.destroyWindow(self.window_name)
-            return outcome  # (base_points, extended_points) or None
+            return outcome  # (base_points, extended_with_center) or None
 
     def _collect(self, store, labels, title, color) -> bool:
         display = self.frame.copy()
@@ -577,18 +629,35 @@ class CalibrationUI:
         order = infer_camera_natural_corner_order(self.base_points)["order"]
         return derive_center_px(self.base_points, order)
 
+    def _extended_center(self):
+        """Extended centre: the clicked point if measured, else the average of the 4 corners."""
+        if "center" in self.extended_points:
+            return self.extended_points["center"]
+        corners = [self.extended_points[label] for label in BASE_CORNER_LABELS
+                   if label in self.extended_points]
+        if len(corners) == 4:
+            return list(np.mean(np.array(corners, dtype=float), axis=0))
+        return None
+
+    def _extended_with_center(self):
+        """The 4 extended corners plus the (measured or interpolated) centre."""
+        extended = {k: v for k, v in self.extended_points.items() if k != "center"}
+        center = self._extended_center()
+        if center is not None:
+            extended["center"] = center
+        return extended
+
     def _launch_inspector(self):
         self.generation += 1
         generation = self.generation
-        frame = self.frame.copy()
-        calibration = build_inspector_calibration(self.base_points, self.extended_points)
+        calibration = build_inspector_calibration(self.base_points, self._extended_with_center())
         config_path = self.config_path
         with self.results_lock:
             self.results = [None] * 64
 
         def work():
             try:
-                results = compute_inspector_results(frame, calibration, config_path)
+                results = compute_inspector_results(calibration, config_path)
             except Exception as exc:  # noqa: BLE001 - a bad in-progress click shouldn't crash the UI
                 print(f"inspector computation failed: {exc}")
                 return
@@ -599,6 +668,7 @@ class CalibrationUI:
         threading.Thread(target=work, daemon=True).start()
 
     def _find_marker(self, x, y):
+        # Only actually-clicked points are draggable (the interpolated centre tracks the corners).
         best, best_dist = None, _DRAG_RADIUS ** 2
         markers = [("base", lbl, p) for lbl, p in self.base_points.items()]
         markers += [("extended", lbl, p) for lbl, p in self.extended_points.items()]
@@ -621,30 +691,28 @@ class CalibrationUI:
                 self.selected = None
                 self._launch_inspector()  # recompute from the corrected points
         elif event == cv2.EVENT_MOUSEWHEEL and self.show_inspector:
-            step = 1 if cv2.getMouseWheelDelta(flags) > 0 else -1
+            self._scroll(_wheel_direction(flags))
+
+    def _scroll(self, step):
+        if step:
             self.inspector_index = (self.inspector_index + step) % 64
             self._redraw()
 
     def _redraw(self):
+        highlight = None
         if self.show_inspector:
             with self.results_lock:
-                result = self.results[self.inspector_index]
-            if result is None:
-                view = np.zeros((320, 320, 3), dtype=np.uint8)
-                cv2.putText(
-                    view, f"{SQUARES[self.inspector_index]}: computing...",
-                    (10, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1
-                )
-            else:
-                view = render_square_inspector(result)
-            cv2.imshow(self.window_name, view)
-        else:
-            cv2.imshow(
-                self.window_name,
-                render_review_overlay(
-                    self.frame, self.base_points, self._center_base(), self.extended_points
-                ),
+                highlight = self.results[self.inspector_index]
+        img = render_full_overlay(
+            self.frame, self.base_points, self._center_base(), self._extended_with_center(),
+            highlight,
+        )
+        if self.show_inspector and highlight is None:
+            cv2.putText(
+                img, f"{SQUARES[self.inspector_index]}: computing...",
+                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2,
             )
+        cv2.imshow(self.window_name, img)
 
     def _review(self):
         self._launch_inspector()
@@ -652,8 +720,8 @@ class CalibrationUI:
         cv2.setMouseCallback(self.window_name, self._on_mouse)
         self._redraw()
         print(
-            "Review: drag any marker to correct. 'i' toggles the per-square inspector, "
-            "mouse-wheel scrolls squares. ENTER/SPACE accept, 'r' retry, 'q'/ESC abort."
+            "Review: drag any marker to correct. 'i' toggles the per-square box overlay; "
+            "mouse-wheel or ,/. steps through squares. ENTER/SPACE accept, 'r' retry, 'q'/ESC abort."
         )
         while True:
             key = cv2.waitKey(30) & 0xFF
@@ -661,10 +729,14 @@ class CalibrationUI:
                 self._redraw()  # pick up freshly computed inspector results
             if key in (13, ord(" ")):
                 cv2.setMouseCallback(self.window_name, lambda *a: None)
-                return self.base_points, self.extended_points
+                return self.base_points, self._extended_with_center()
             if key == ord("i"):
                 self.show_inspector = not self.show_inspector
                 self._redraw()
+            elif key in (ord("."), ord("]")):
+                self._scroll(1)
+            elif key in (ord(","), ord("[")):
+                self._scroll(-1)
             elif key == ord("r"):
                 cv2.setMouseCallback(self.window_name, lambda *a: None)
                 return "retry"
@@ -673,11 +745,13 @@ class CalibrationUI:
                 return None
 
 
-def annotate_existing(image_path: Path, config_path="config.yaml") -> dict | None:
+def annotate_existing(
+    image_path: Path, config_path="config.yaml", annotate_center: bool = False
+) -> dict | None:
     """
-    Load a stored raw image, undistort it, collect the v2 calibration (4 base corners + 5
-    extended points including the centre) interactively, and write (or overwrite)
-    calibration_metadata.json in the same directory.
+    Load a stored raw image, undistort it, collect the v2 calibration (4 base corners + 4
+    extended corners, plus the extended centre only if ``annotate_center``) interactively, and
+    write (or overwrite) calibration_metadata.json in the same directory.
 
     Pre-existing metadata fields (height_mm, pitch_deg, timestamp, …) are preserved; the
     corner/centre/intrinsics fields are (re)written on the undistorted frame.
@@ -706,7 +780,9 @@ def annotate_existing(image_path: Path, config_path="config.yaml") -> dict | Non
 
     undistorted, K, D, image_size = undistort_reference_frame(frame, setup_dir)
 
-    collected = CalibrationUI(undistorted, config_path).run()
+    collected = CalibrationUI(
+        undistorted, config_path, annotate_center=annotate_center
+    ).run()
     if collected is None:
         cv2.destroyAllWindows()
         return None
@@ -721,6 +797,7 @@ def annotate_existing(image_path: Path, config_path="config.yaml") -> dict | Non
         D=D,
         image_size=image_size,
         raw_image_path=image_path,
+        center_measured=annotate_center,
     )
 
     with metadata_path.open("w", encoding="utf-8") as f:
@@ -735,12 +812,15 @@ def annotate_existing(image_path: Path, config_path="config.yaml") -> dict | Non
 def relabel_existing_setups(
     data_root: Path = Path("data") / "generated",
     config_path="config.yaml",
+    annotate_center: bool = False,
 ) -> None:
     """Phase 1: re-run the v2 calibration UI over every existing setup's stored ``raw.png``.
 
-    Opens each ``<setup>/raw.png`` undistorted in the improved UI (re-clicking all corners plus
-    the new centre fresh) and writes updated versioned metadata in place. Only touches the
-    setups, not the captured frames — Phase 2 (``regenerate.py``) regenerates those afterwards.
+    Opens each ``<setup>/raw.png`` undistorted in the improved UI (re-clicking all corners fresh)
+    and writes updated versioned metadata in place. ``annotate_center`` defaults to False — the
+    central square is usually empty, so its extended point is interpolated from the corners
+    rather than clicked. Only touches the setups, not the captured frames — Phase 2
+    (``regenerate.py``) regenerates those afterwards.
     """
     data_root = Path(data_root)
     setups = sorted(
@@ -750,7 +830,7 @@ def relabel_existing_setups(
     print("Per setup: ENTER/SPACE accept, 'r' retry, 'q'/ESC abort (stops the session).")
     for i, setup_dir in enumerate(setups, 1):
         print(f"\n[{i}/{len(setups)}] {setup_dir.name}")
-        if annotate_existing(setup_dir / "raw.png", config_path) is None:
+        if annotate_existing(setup_dir / "raw.png", config_path, annotate_center) is None:
             print("Aborted; stopping relabelling session.")
             break
 
@@ -758,10 +838,15 @@ def relabel_existing_setups(
 if __name__ == "__main__":
     import sys
 
-    if len(sys.argv) > 1:
-        if sys.argv[1] == "relabel":
-            relabel_existing_setups()
+    args = sys.argv[1:]
+    # `--center` opts into clicking the extended centre (default: interpolate it from corners).
+    annotate_center = "--center" in args
+    args = [a for a in args if a != "--center"]
+
+    if args:
+        if args[0] == "relabel":
+            relabel_existing_setups(annotate_center=annotate_center)
         else:
-            annotate_existing(Path(sys.argv[1]))
+            annotate_existing(Path(args[0]), annotate_center=annotate_center)
     else:
-        calibrate()
+        calibrate(annotate_center=annotate_center)
