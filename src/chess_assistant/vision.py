@@ -19,7 +19,7 @@ import numpy as np
 from omegaconf import OmegaConf, DictConfig
 
 from chess_assistant.config import SQUARES
-from chess_assistant.model.config import INVERSE_TARGET_MAP
+from chess_assistant.model.config import INVERSE_TARGET_MAP, TARGET_MAP, reconstruct_13way_logprobs
 from chess_assistant.model.data import EVAL_TRANSFORM
 
 load_dotenv()
@@ -212,20 +212,32 @@ class BoardEstimator:
             image = torch.cat([rgb, mask]).unsqueeze(dim=0).to(self.device)
             assert image.shape == (1, 4, 144, 144)
             
-            logits = self.model(image, metadata).squeeze()
-            # Shape of the non-squeezed logits would be (1, 13)
-
-            # Now turn the logits into the square prediction;
-            # Perhaps just maintain the raw logits?
+            # Now turn the model output into the square prediction;
+            # in both cases we store logit-like values (raw logits or reconstructed
+            # log-probabilities), which game.py feeds into its own CrossEntropyLoss.
             square_estimate = SquareEstimate(
                 image_path=image_path,
                 copied=False,
                 copied_from=None
             )
 
-            for label in INVERSE_TARGET_MAP.keys():
-                # label takes values in 0, ..., 12
-                setattr(square_estimate, INVERSE_TARGET_MAP[label], logits[label].item())
+            if hasattr(self.model, "empty_head"):
+                # Multi-head model (model 3): recombine the three heads into 13-way
+                # log-probabilities. softmax(log p) == p and the reconstructed probs sum to
+                # 1, so log p is a drop-in for the old single-head logits under the softmax
+                # game.py re-applies downstream.
+                logit_empty, logits_color, logits_type = self.model(image, metadata)
+                logprobs = reconstruct_13way_logprobs(
+                    logit_empty.squeeze(0), logits_color.squeeze(0), logits_type.squeeze(0)
+                )
+                for label, idx in TARGET_MAP.items():
+                    setattr(square_estimate, label, logprobs[idx].item())
+            else:
+                logits = self.model(image, metadata).squeeze()
+                # Shape of the non-squeezed logits would be (1, 13)
+                for label in INVERSE_TARGET_MAP.keys():
+                    # label takes values in 0, ..., 12
+                    setattr(square_estimate, INVERSE_TARGET_MAP[label], logits[label].item())
 
             return square_estimate
 

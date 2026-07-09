@@ -9,7 +9,7 @@ from torchvision.transforms import v2
 
 from pathlib import Path, PureWindowsPath
 
-from chess_assistant.model.config import TARGET_MAP
+from chess_assistant.model.config import decompose_label
 
 TRAIN_TRANSFORM = v2.Compose([
     v2.ToImage(), 
@@ -27,9 +27,9 @@ class squareDataset(Dataset):
         self, 
         csv_path: Path = Path("data/generated/data.csv"), 
         split: str = "train",
-        train_transform= v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)]), 
+        train_transform= v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)]),
         eval_transform = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)]),
-        target_transform = TARGET_MAP.__getitem__,
+        target_transform = decompose_label,
     ):
         if split not in ["train", "val", "test"]:
             raise ValueError(f"Split must be of type train, val or test. Got {split}.")
@@ -82,9 +82,10 @@ class squareDataset(Dataset):
         if not isinstance(image, torch.Tensor):
             raise TypeError("images must be torch tensors. Pass transform to ensure.")
 
-        label = self.data[idx, "label"]
-        if self.target_transform:
-            label = self.target_transform(label)
+        # Decompose the 13-way label into per-head targets:
+        #   is_piece (float 0/1), color_target (0/1 or IGNORE_INDEX), type_target (0..5 or IGNORE_INDEX)
+        raw_label = self.data[idx, "label"]
+        is_piece, color_target, type_target = self.target_transform(raw_label)
 
         # what metadata do we want?
         # OHE version of which square is at the top; this can be accessed using setup_id -> setup calibration metadata 
@@ -107,8 +108,8 @@ class squareDataset(Dataset):
             ]
         metadata.extend(self.setup_metadata_store[setup_id])
         metadata = torch.tensor(metadata, dtype=torch.float32)
-        
-        return image, metadata, label
+
+        return image, metadata, is_piece, color_target, type_target
 
         # TODO: for val/test we may also want image_id (to test if equal for all); valid_game_position; previous_board_fen; board_fen; move_uci
         # Issue with the dataloader approach to "randomly" get just images from one board position in one batch
@@ -128,9 +129,9 @@ def create_dataloader(
     num_workers: int = 0,
     persistent_workers: bool = False,
     pin_memory: bool = False,
-    train_transform = TRAIN_TRANSFORM, 
+    train_transform = TRAIN_TRANSFORM,
     eval_transform = EVAL_TRANSFORM,
-    target_transform = TARGET_MAP.__getitem__,
+    target_transform = decompose_label,
     csv_path = Path("data/generated/data.csv"),
 ):  
     if split not in ["train", "val", "test"]:

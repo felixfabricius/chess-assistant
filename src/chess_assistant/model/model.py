@@ -198,6 +198,112 @@ class SquareClassifier2(nn.Module):
         logits = self.mlp_2(mlp_input)
         return logits
 
+
+class SquareClassifierMultiHead(nn.Module):
+    def __init__(self):
+        super().__init__()
+        """
+        Same trunk as SquareClassifier2 (conv feature extraction, residual dilated block,
+        adaptive max/avg pooling, metadata MLP -> mlp_input), but the single 13-way head is
+        replaced by three heads:
+          - empty_head: 1 logit (empty vs non-empty)
+          - color_head: 2 logits (white/black | non-empty)
+          - type_head:  6 logits (K/Q/R/B/N/P | non-empty)
+        The color/type heads pool data across the other factor, which helps the
+        data-starved king/queen classes. The three heads are recombined into the original
+        13-way distribution at inference/eval time via reconstruct_13way_logprobs.
+        """
+        # Downsample using max pool
+        self.max_pool_1 = nn.MaxPool2d(
+            kernel_size=2,
+            stride=2
+        )
+
+        # ReLU
+        self.relu = nn.ReLU()
+
+        ### Image feature extraction
+        self.image_feature_extraction_1 = nn.Sequential(
+            nn.Conv2d(in_channels=4, out_channels=32, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(32),
+            self.relu,
+            self.max_pool_1,
+            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            self.relu,
+            self.max_pool_1,
+            nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(128),
+            self.relu,
+            self.max_pool_1
+        )
+        self.image_feature_extraction_2 = nn.Sequential(
+            nn.Conv2d(in_channels=128, out_channels=128, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(128),
+            self.relu,
+            # Increase receptive field of neurons in final layer through a series
+            # of depthwise dilated convolutions, followed by a channel mix-in
+            nn.Conv2d(128, 128, kernel_size=3, groups=128, padding=1),
+            nn.BatchNorm2d(128),
+            self.relu,
+            nn.Conv2d(128, 128, kernel_size=3, groups=128, dilation=2, padding=2, bias=False),
+            nn.BatchNorm2d(128),
+            self.relu,
+            nn.Conv2d(128, 128, kernel_size=3, groups=128, dilation=5, padding=5, bias=False),
+            nn.BatchNorm2d(128),
+            self.relu,
+            # 1x1 Channel mix-in
+            nn.Conv2d(128, 128, kernel_size=1, groups=1, dilation=1, padding=0, bias=False),
+            nn.BatchNorm2d(128),
+        )
+        # Initialise the weights (scale) of the last batch norm to zero; so by default
+        # image_feature_extraction_2 is the identiy
+        nn.init.zeros_(self.image_feature_extraction_2[-1].weight)
+
+        # Adaptive Average Pooling at end; 2x2 to preserve SOME spatial structure
+        self.max_pool = nn.AdaptiveMaxPool2d((2, 2))
+        self.avg_pool = nn.AdaptiveAvgPool2d((2, 2))
+
+        ### Preprocessing of additional info: small MLP
+        self.bn1 = nn.BatchNorm1d(10)
+        self.mlp_1 = nn.Sequential(
+            nn.Linear(10, 16),
+            self.relu
+        )
+
+        ### Three heads over the shared 1040-dim mlp_input (1024 image + 16 metadata).
+        # empty / color are easy -> a single Linear each.
+        self.empty_head = nn.Linear(1024 + 16, 1)
+        self.color_head = nn.Linear(1024 + 16, 2)
+        # type is the hardest sub-task (still pawn-imbalanced even after pooling colors)
+        # -> give it a bit more capacity with one hidden layer.
+        self.type_head = nn.Sequential(
+            nn.Linear(1024 + 16, 64),
+            self.relu,
+            nn.Linear(64, 6)
+        )
+
+    def forward(self, image, metadata):
+        image_features = self.image_feature_extraction_1(image)
+        # Add a residual connection for this part, which is quite deep
+        image_features = self.relu(image_features + self.image_feature_extraction_2(image_features))
+        image_features = torch.cat(
+            (
+                torch.flatten(self.max_pool(image_features), start_dim=1),
+                torch.flatten(self.avg_pool(image_features), start_dim=1)
+            ),
+            dim=1
+        )
+        normed_metadata = self.bn1(metadata)
+        metadata_features = self.mlp_1(normed_metadata)
+        mlp_input = torch.cat([image_features, metadata_features], dim=1)
+
+        logit_empty = self.empty_head(mlp_input).squeeze(-1)  # (batch,)
+        logits_color = self.color_head(mlp_input)             # (batch, 2)
+        logits_type = self.type_head(mlp_input)               # (batch, 6)
+        return logit_empty, logits_color, logits_type
+
+
 if __name__ == "__main__":
     model = SquareClassifier()
     n_params = sum(p.numel() for p in model.parameters())
