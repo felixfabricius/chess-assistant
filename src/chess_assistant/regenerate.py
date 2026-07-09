@@ -101,10 +101,25 @@ def iter_frames(data_root: Path):
                 yield setup_dir, frame_dir
 
 
+def _print_progress(done: int, total: int, failures: int) -> None:
+    """Overwrite a single-line progress bar in place (dependency-free)."""
+    width = 30
+    filled = int(width * done / total) if total else width
+    bar = "#" * filled + "-" * (width - filled)
+    pct = (100 * done / total) if total else 100.0
+    suffix = f"  {failures} failed" if failures else ""
+    print(f"\r  [{bar}] {done}/{total} ({pct:3.0f}%){suffix}", end="", flush=True)
+
+
 def regenerate_all(data_root=DATA_ROOT, config_path="config.yaml", max_workers=None) -> None:
     """Regenerate every frame under ``data_root`` using one persistent process pool."""
     tasks = list(iter_frames(Path(data_root)))
-    print(f"Regenerating {len(tasks)} frames...")
+    total = len(tasks)
+    print(f"Regenerating {total} frames...")
+    if total == 0:
+        return
+
+    completed = 0
     failures = 0
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {
@@ -113,12 +128,15 @@ def regenerate_all(data_root=DATA_ROOT, config_path="config.yaml", max_workers=N
         }
         for future in as_completed(futures):
             frame = futures[future]
+            completed += 1
             try:
                 future.result()
             except Exception as exc:  # noqa: BLE001 - report and keep going
                 failures += 1
-                print(f"FAILED {frame}: {exc}")
-    print(f"Done. {len(tasks) - failures}/{len(tasks)} frames regenerated.")
+                print(f"\n  FAILED {frame}: {exc}")
+            _print_progress(completed, total, failures)
+    print()  # finish the progress line
+    print(f"Done. {total - failures}/{total} frames regenerated.")
 
 
 if __name__ == "__main__":

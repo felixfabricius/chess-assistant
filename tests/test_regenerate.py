@@ -7,10 +7,32 @@ leaves every ground-truth ``"label"`` byte-identical.
 import json
 
 from chess_assistant.regenerate import (
+    _print_progress,
     iter_frames,
     read_existing_labels,
+    regenerate_all,
     regenerate_frame,
 )
+
+
+def test_print_progress_formats(capsys):
+    _print_progress(3, 10, 0)
+    out = capsys.readouterr().out
+    assert "3/10" in out and "30%" in out
+
+    _print_progress(10, 10, 2)
+    out = capsys.readouterr().out
+    assert "10/10" in out and "100%" in out and "2 failed" in out
+
+
+def test_regenerate_all_reports_progress_and_completes(make_v2_setup, capsys):
+    setup_dir, frame_dirs, _ = make_v2_setup(n_frames=2)
+    regenerate_all(data_root=setup_dir.parent, config_path="config.yaml", max_workers=2)
+    out = capsys.readouterr().out
+    assert "Regenerating 2 frames" in out
+    assert "Done. 2/2 frames regenerated." in out
+    for frame_dir in frame_dirs:
+        assert (frame_dir / "image_warped.png").exists()
 
 
 def test_regenerate_frame_preserves_labels_and_updates_geometry(make_v2_setup):
