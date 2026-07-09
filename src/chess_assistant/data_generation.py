@@ -208,10 +208,18 @@ class DataGenerationSession:
     (calibrate / capture / warp / cutout) is called from here.
     """
 
-    def __init__(self, config_path: Path, data_root: Path = DATA_ROOT) -> None:
+    def __init__(
+        self,
+        config_path: Path,
+        data_root: Path = DATA_ROOT,
+        annotate_center: bool = False,
+    ) -> None:
         self.config_path = Path(config_path)
         self.data_root = Path(data_root)
         self.csv_path = self.data_root / CSV_NAME
+        # When True, calibration measures the extended centre point (click it); otherwise the
+        # centre is interpolated from the 4 corners. See chess_assistant.calibration.CalibrationUI.
+        self.annotate_center = annotate_center
 
         # Set once a setup has been calibrated.
         self.setup_id: str | None = None
@@ -244,7 +252,7 @@ class DataGenerationSession:
         """
         setup_id, setup_dir, setup_split = create_setup(self.data_root)
 
-        calibration_data = calibrate(setup_dir)
+        calibration_data = calibrate(setup_dir, self.config_path, self.annotate_center)
         if not calibration_data:
             print("Calibration was aborted or failed. Setup not created.")
             return False
@@ -776,15 +784,27 @@ class BoardUI:
 def generate_data(
     config_path: Path = Path("config.yaml"),
     data_root: Path = DATA_ROOT,
+    annotate_center: bool = False,
 ) -> None:
-    """Entry point: open the virtual board and run the capture loop."""
-    session = DataGenerationSession(config_path=Path(config_path), data_root=Path(data_root))
+    """Entry point: open the virtual board and run the capture loop.
+
+    ``annotate_center`` (default False) is passed through to calibration for every setup /
+    recalibration in this session: True clicks the extended centre point, False interpolates it
+    from the corners.
+    """
+    session = DataGenerationSession(
+        config_path=Path(config_path),
+        data_root=Path(data_root),
+        annotate_center=annotate_center,
+    )
     ui = BoardUI(session)
     ui.run()
 
 
 if __name__ == "__main__":
-    generate_data()
+    import sys
+
+    generate_data(annotate_center="--center" in sys.argv[1:])
 
 
 

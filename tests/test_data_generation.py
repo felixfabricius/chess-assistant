@@ -208,7 +208,7 @@ def _patch_hardware(monkeypatch):
     """Stub out the robot-facing calibrate/Processor so setup logic is testable."""
     import chess_assistant.data_generation as dg
 
-    monkeypatch.setattr(dg, "calibrate", lambda setup_dir: {"stub": True})
+    monkeypatch.setattr(dg, "calibrate", lambda *a, **k: {"stub": True})
     monkeypatch.setattr(dg, "Processor", lambda *args, **kwargs: object())
 
 
@@ -251,8 +251,24 @@ def test_failed_calibration_does_not_change_board(tmp_path, monkeypatch):
     session.apply_legal_move("e2", "e4")
     fen_before = session.board.fen()
 
-    monkeypatch.setattr(dg, "calibrate", lambda setup_dir: None)  # aborted
+    monkeypatch.setattr(dg, "calibrate", lambda *a, **k: None)  # aborted
     assert session.start_new_setup() is False
     # Nothing was reset or half-applied.
     assert session.processor is None
     assert session.board.fen() == fen_before
+
+
+def test_annotate_center_flag_passed_to_calibrate(tmp_path, monkeypatch):
+    import chess_assistant.data_generation as dg
+
+    calls = []
+    monkeypatch.setattr(dg, "calibrate", lambda *a, **k: (calls.append((a, k)), {"stub": True})[1])
+    monkeypatch.setattr(dg, "Processor", lambda *a, **k: object())
+
+    session = DataGenerationSession(
+        config_path="config.yaml", data_root=tmp_path, annotate_center=True
+    )
+    assert session.start_new_setup() is True
+    # calibrate was called with annotate_center=True (3rd positional arg).
+    args, _kwargs = calls[0]
+    assert args[2] is True
