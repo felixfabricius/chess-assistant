@@ -9,8 +9,25 @@ import pytest
 
 from chess_assistant.calibration import (
     build_calibration_metadata,
+    build_inspector_calibration,
+    compute_inspector_results,
     derive_center_px,
+    render_review_overlay,
+    render_square_inspector,
 )
+
+
+def _base_and_extended_points(s=0.15, apex=(960.0, -600.0)):
+    actual = {"a8": [700, 300], "h8": [1220, 300], "h1": [1500, 800], "a1": [420, 800]}
+    apex_arr = np.array(apex)
+    extended = {
+        k: (np.array(v, float) + s * (apex_arr - np.array(v, float))).tolist()
+        for k, v in actual.items()
+    }
+    order = {"tl": "a8", "tr": "h8", "br": "h1", "bl": "a1"}
+    center_base = np.array(derive_center_px(actual, order))
+    extended["center"] = (center_base + s * (apex_arr - center_base)).tolist()
+    return actual, extended, center_base
 
 
 def test_derive_center_px_square_board():
@@ -85,3 +102,45 @@ def test_build_calibration_metadata_round_trips_through_processor():
     assert processor.square_geometry is not None
     assert len(processor.square_geometry) == 64
     assert processor.vp_residual < 1.0
+
+
+# --------------------------------------------------------------------------------------------
+# Headless calibration-UI helpers (the interactive event loop is validated by hand)
+# --------------------------------------------------------------------------------------------
+
+def test_build_inspector_calibration_keys():
+    base, extended, _ = _base_and_extended_points()
+    calib = build_inspector_calibration(base, extended)
+    assert set(calib) == {
+        "camera_natural_orientation",
+        "actual_corners_px",
+        "extended_corners_px",
+        "extended_center_px",
+    }
+    assert "center" not in calib["extended_corners_px"]
+    assert calib["extended_center_px"] == extended["center"]
+
+
+def test_compute_inspector_results_shape():
+    base, extended, _ = _base_and_extended_points()
+    calib = build_inspector_calibration(base, extended)
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    results = compute_inspector_results(frame, calib, None)
+    assert len(results) == 64
+    for r in results:
+        assert r.floor_local.shape == (4, 2)
+        assert r.ceiling_local.shape == (4, 2)
+        assert r.crop.ndim == 3
+
+
+def test_render_helpers_produce_images():
+    base, extended, center_base = _base_and_extended_points()
+    calib = build_inspector_calibration(base, extended)
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+
+    results = compute_inspector_results(frame, calib, None)
+    view = render_square_inspector(results[10], size=200)
+    assert view.ndim == 3 and max(view.shape[:2]) == 200
+
+    overlay = render_review_overlay(frame, base, center_base, extended)
+    assert overlay.shape == frame.shape
