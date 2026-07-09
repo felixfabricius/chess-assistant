@@ -1,0 +1,165 @@
+"""Tests for the pure geometry helpers in image_processing and the v2 Processor geometry.
+
+Import-light: cv2/numpy only, no reachy/pygame/torch.
+"""
+
+import json
+
+import cv2
+import numpy as np
+import pytest
+
+from chess_assistant.image_processing import (
+    QuadrantMagnitudeField,
+    bilinear_interp,
+    estimate_vanishing_point,
+    Processor,
+)
+
+
+# --------------------------------------------------------------------------------------------
+# estimate_vanishing_point
+# --------------------------------------------------------------------------------------------
+
+def test_estimate_vanishing_point_recovers_apex():
+    apex = np.array([320.0, -450.0])
+    base_pts = np.array([[100.0, 500.0], [540.0, 500.0], [300.0, 480.0], [200.0, 520.0],
+                         [420.0, 470.0]])
+    # Each extended point lies on the ray from its base toward the apex.
+    ext_pts = base_pts + 0.3 * (apex - base_pts)
+    V, residual = estimate_vanishing_point(base_pts, ext_pts)
+    assert np.allclose(V, apex, atol=1e-6)
+    assert residual == pytest.approx(0.0, abs=1e-6)
+
+
+def test_estimate_vanishing_point_residual_flags_bad_ray():
+    apex = np.array([320.0, -450.0])
+    base_pts = np.array([[100.0, 500.0], [540.0, 500.0], [300.0, 480.0], [420.0, 470.0]])
+    ext_pts = base_pts + 0.3 * (apex - base_pts)
+    # Corrupt one ray so it no longer points at the apex.
+    ext_pts[0] = ext_pts[0] + np.array([40.0, 0.0])
+    V, residual = estimate_vanishing_point(base_pts, ext_pts)
+    assert residual > 1.0  # a bad click shows up as a large mean residual
+
+
+# --------------------------------------------------------------------------------------------
+# bilinear_interp
+# --------------------------------------------------------------------------------------------
+
+def test_bilinear_interp_corners():
+    assert bilinear_interp(1, 2, 3, 4, 0, 0) == 1  # tl
+    assert bilinear_interp(1, 2, 3, 4, 1, 0) == 2  # tr
+    assert bilinear_interp(1, 2, 3, 4, 1, 1) == 3  # br
+    assert bilinear_interp(1, 2, 3, 4, 0, 1) == 4  # bl
+
+
+def test_bilinear_interp_midpoints():
+    # centre = mean of all four; edge midpoints = mean of the two adjacent corners.
+    assert bilinear_interp(0, 0, 0, 0, 0.5, 0.5) == 0
+    assert bilinear_interp(2, 4, 8, 6, 0.5, 0.5) == pytest.approx(5.0)
+    assert bilinear_interp(2, 4, 8, 6, 0.5, 0.0) == pytest.approx(3.0)  # top edge midpoint
+
+
+# --------------------------------------------------------------------------------------------
+# QuadrantMagnitudeField
+# --------------------------------------------------------------------------------------------
+
+def test_quadrant_field_returns_measured_values_at_nodes():
+    f = QuadrantMagnitudeField(m_tl=10, m_tr=20, m_br=30, m_bl=40, m_center=100)
+    assert f(0, 0) == pytest.approx(10)
+    assert f(1, 0) == pytest.approx(20)
+    assert f(1, 1) == pytest.approx(30)
+    assert f(0, 1) == pytest.approx(40)
+    assert f(0.5, 0.5) == pytest.approx(100)
+
+
+def test_quadrant_field_edge_midpoints_are_corner_means():
+    f = QuadrantMagnitudeField(m_tl=10, m_tr=20, m_br=30, m_bl=40, m_center=100)
+    assert f(0.5, 0.0) == pytest.approx(15)  # top mid = (tl+tr)/2
+    assert f(1.0, 0.5) == pytest.approx(25)  # right mid = (tr+br)/2
+    assert f(0.5, 1.0) == pytest.approx(35)  # bottom mid = (br+bl)/2
+    assert f(0.0, 0.5) == pytest.approx(25)  # left mid = (tl+bl)/2
+
+
+def test_quadrant_field_continuous_across_boundary():
+    f = QuadrantMagnitudeField(m_tl=10, m_tr=20, m_br=30, m_bl=40, m_center=100)
+    eps = 1e-6
+    # Straddle the u=0.5 seam in the top half.
+    assert f(0.5 - eps, 0.25) == pytest.approx(f(0.5 + eps, 0.25), abs=1e-3)
+    # Straddle the v=0.5 seam in the left half.
+    assert f(0.25, 0.5 - eps) == pytest.approx(f(0.25, 0.5 + eps), abs=1e-3)
+
+
+# --------------------------------------------------------------------------------------------
+# Processor v2 geometry (synthetic calibration)
+# --------------------------------------------------------------------------------------------
+
+def _intersect(p1, p2, p3, p4):
+    """Intersection of line p1-p2 with line p3-p4."""
+    p1, p2, p3, p4 = (np.asarray(p, dtype=np.float64) for p in (p1, p2, p3, p4))
+    d1, d2 = p2 - p1, p4 - p3
+    t = np.linalg.solve(np.array([[d1[0], -d2[0]], [d1[1], -d2[1]]]), p3 - p1)
+    return p1 + t[0] * d1
+
+
+def _write_v2_metadata(tmp_path, apex=(960.0, -600.0), s=0.18):
+    corner_map = {"tl": "a8", "tr": "h8", "br": "h1", "bl": "a1"}
+    actual = {
+        "a8": [700.0, 300.0],
+        "h8": [1220.0, 300.0],
+        "h1": [1500.0, 800.0],
+        "a1": [420.0, 800.0],
+    }
+    apex = np.array(apex)
+    extended = {
+        label: (np.array(px) + s * (apex - np.array(px))).tolist()
+        for label, px in actual.items()
+    }
+    # The board centre (board coord (0.5, 0.5)) maps to the intersection of the corner-quad's
+    # diagonals — that is the true base of the centre extension. Seeding it here makes all five
+    # rays converge exactly at the camera apex, so the warped V equals H(apex).
+    center_base = _intersect(actual["a8"], actual["h1"], actual["h8"], actual["a1"])
+    extended_center = (center_base + s * (apex - center_base)).tolist()
+
+    metadata = {
+        "calibration_version": 2,
+        "camera_natural_orientation": {"order": corner_map},
+        "actual_corner_order": ["a1", "a8", "h8", "h1"],
+        "actual_corners_px": actual,
+        "extended_corner_order": ["a1", "a8", "h8", "h1"],
+        "extended_corners_px": extended,
+        "extended_center_px": extended_center,
+    }
+    path = tmp_path / "calibration_metadata.json"
+    path.write_text(json.dumps(metadata), encoding="utf-8")
+    return path
+
+
+def test_processor_v2_builds_vanishing_point_and_field(tmp_path):
+    apex = (960.0, -600.0)
+    processor = Processor(_write_v2_metadata(tmp_path, apex=apex), None)
+
+    assert processor.is_v2 is True
+    assert processor.V is not None and processor.V.shape == (2,)
+    assert np.all(np.isfinite(processor.V))
+    # All five rays converge exactly at the camera apex, so V == H(apex) and residual ~ 0.
+    assert processor.vp_residual < 0.5
+    expected_V = cv2.perspectiveTransform(
+        np.array([[apex]], dtype=np.float32), processor.matrix
+    ).reshape(2)
+    assert np.allclose(processor.V, expected_V, atol=1.0)
+
+    # Magnitude field returns the measured (positive) corner magnitudes at the board corners.
+    field = processor.magnitude_field
+    for u, v in [(0, 0), (1, 0), (1, 1), (0, 1), (0.5, 0.5)]:
+        assert field(u, v) > 0.0
+
+
+def test_processor_v1_metadata_has_no_v2_geometry():
+    processor = Processor(
+        __import__("pathlib").Path("data/generated/2026-07-01_175334/calibration_metadata.json"),
+        "config.yaml",
+    )
+    assert processor.is_v2 is False
+    assert processor.V is None
+    assert processor.magnitude_field is None

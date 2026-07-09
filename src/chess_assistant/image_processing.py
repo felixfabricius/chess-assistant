@@ -67,6 +67,86 @@ def letterbox(
 
     return out
 
+
+def estimate_vanishing_point(
+    base_pts: np.ndarray, ext_pts: np.ndarray
+) -> tuple[np.ndarray, float]:
+    """Least-squares intersection of the N base->ext rays.
+
+    ``base_pts``, ``ext_pts``: ``(N, 2)`` in the same frame. Returns ``(V, mean_residual)`` —
+    the point minimising the summed squared perpendicular distance to every ray, and the mean
+    perpendicular distance from ``V`` to each ray (a fit-quality diagnostic; one ray far larger
+    than the others usually means a bad click, not a modelling problem).
+    """
+    base_pts = np.asarray(base_pts, dtype=np.float64)
+    ext_pts = np.asarray(ext_pts, dtype=np.float64)
+    dirs = ext_pts - base_pts
+    dirs_unit = dirs / np.linalg.norm(dirs, axis=1, keepdims=True)
+    A = np.zeros((2, 2))
+    b = np.zeros(2)
+    for p, d in zip(base_pts, dirs_unit):
+        d = d.reshape(2, 1)
+        M = np.eye(2) - d @ d.T
+        A += M
+        b += M @ p
+    V = np.linalg.solve(A, b)
+    residuals = [
+        np.linalg.norm((np.eye(2) - d.reshape(2, 1) @ d.reshape(1, 2)) @ (V - p))
+        for p, d in zip(base_pts, dirs_unit)
+    ]
+    return V, float(np.mean(residuals))
+
+
+def bilinear_interp(m_tl, m_tr, m_br, m_bl, u, v):
+    """Bilinear value over a unit patch. ``(u, v)`` in ``[0,1]^2`` (u: left->right, v: top->bottom).
+
+    Corners map exactly: ``(0,0)->m_tl``, ``(1,0)->m_tr``, ``(1,1)->m_br``, ``(0,1)->m_bl``.
+    """
+    top = m_tl * (1 - u) + m_tr * u
+    bottom = m_bl * (1 - u) + m_br * u
+    return top * (1 - v) + bottom * v
+
+
+class QuadrantMagnitudeField:
+    """Per-square extension magnitude over board coords ``(u, v) in [0,1]^2``.
+
+    Four corner + one centre magnitudes are measured; the four edge midpoints are derived as
+    the mean of their two adjacent corners (matching what a plain bilinear patch predicts along
+    an edge). The board is split into NW/NE/SE/SW quadrant patches (each bounded by one real
+    corner, the centre, and two derived edge midpoints); a query ``(u, v)`` is dispatched to its
+    quadrant, remapped to that quadrant's local ``[0,1]^2`` and bilinearly interpolated.
+    """
+
+    def __init__(self, m_tl, m_tr, m_br, m_bl, m_center):
+        self.m_tl = m_tl
+        self.m_tr = m_tr
+        self.m_br = m_br
+        self.m_bl = m_bl
+        self.m_center = m_center
+        # Derived edge midpoints.
+        self.m_tm = (m_tl + m_tr) / 2  # top
+        self.m_rm = (m_tr + m_br) / 2  # right
+        self.m_bm = (m_br + m_bl) / 2  # bottom
+        self.m_lm = (m_tl + m_bl) / 2  # left
+
+    def __call__(self, u, v):
+        u = min(max(float(u), 0.0), 1.0)
+        v = min(max(float(v), 0.0), 1.0)
+        if u <= 0.5 and v <= 0.5:  # NW
+            vals = (self.m_tl, self.m_tm, self.m_center, self.m_lm)
+            lu, lv = u * 2, v * 2
+        elif u > 0.5 and v <= 0.5:  # NE
+            vals = (self.m_tm, self.m_tr, self.m_rm, self.m_center)
+            lu, lv = (u - 0.5) * 2, v * 2
+        elif u > 0.5 and v > 0.5:  # SE
+            vals = (self.m_center, self.m_rm, self.m_br, self.m_bm)
+            lu, lv = (u - 0.5) * 2, (v - 0.5) * 2
+        else:  # SW
+            vals = (self.m_lm, self.m_center, self.m_bm, self.m_bl)
+            lu, lv = u * 2, (v - 0.5) * 2
+        return bilinear_interp(vals[0], vals[1], vals[2], vals[3], lu, lv)
+
+
 class Processor:
     def __init__(self, metadata_path: Path, config_path: Path | None = None) -> None:
         """
@@ -153,16 +233,29 @@ class Processor:
                 # y-difference. If > 0, then extended corner is further below -> need to pad downwards
                 # if < 0, extended corner is further above
             # Can extract padding by taking the maximum of these dimensions
-        # p_up: 'padding_up'. How many pixels to add to top? of square
-        p_up = round(1.05 * max(np.max(-pixel_differences, axis=0)[1], 0))
-            # Take maximum of negative difference 
-            # (negative means extended corner is above actual corner)
-            # across the 4 corners.
-            # Also floor padding in every direction at 0.
-        p_down = round(1.05 * max(np.max(pixel_differences, axis=0)[1], 0))
+        # v2 calibration adds a measured "center" extension point (its base is the board
+        # centre, derived from the homography at board coord (0.5, 0.5); only its extended
+        # position is clicked). Correctness fix vs the old 4-corner-only padding: the measured
+        # centre can exceed every corner, so the canvas must be sized over all 5 measured
+        # extension points, not just the 4 corners.
+        is_v2 = "extended_center_px" in metadata
+        differences_for_padding = pixel_differences
+        if is_v2:
+            dst_extended_center_initial = cv2.perspectiveTransform(
+                np.array([[metadata["extended_center_px"]]], dtype=np.float32),
+                matrix_initial,
+            ).reshape(2)
+            center_base_initial = np.array([last_coordinate / 2.0, last_coordinate / 2.0])
+            differences_for_padding = np.vstack(
+                [pixel_differences, dst_extended_center_initial - center_base_initial]
+            )
 
-        p_left = round(1.05 * max(np.max(-pixel_differences, axis=0)[0], 0))
-        p_right = round(1.05 * max(np.max(pixel_differences, axis=0)[0], 0))
+        # p_up: 'padding_up'. Max signed extension across the measured points in each
+        # direction, floored at 0, with a 5% margin.
+        p_up = round(1.05 * max(np.max(-differences_for_padding, axis=0)[1], 0))
+        p_down = round(1.05 * max(np.max(differences_for_padding, axis=0)[1], 0))
+        p_left = round(1.05 * max(np.max(-differences_for_padding, axis=0)[0], 0))
+        p_right = round(1.05 * max(np.max(differences_for_padding, axis=0)[0], 0))
 
         padding = {
             "up": p_up,
@@ -206,6 +299,46 @@ class Processor:
                 np.asarray(camera_intrinsics["K"], dtype=np.float64),
                 np.asarray(camera_intrinsics["D"], dtype=np.float64),
                 (width, height),
+            )
+
+        # Perspective geometry (v2 calibration only): vanishing point V and the quadrant
+        # magnitude field, both expressed in the padded warped frame that cutout() crops from
+        # (so V and the per-square floor corners share one frame, no conversion needed).
+        self.is_v2 = is_v2
+        self.V = None
+        self.vp_residual = None
+        self.magnitude_field = None
+        self.square_geometry = None
+        if is_v2:
+            base_center = np.array(
+                [padding["left"] + board_size / 2.0, padding["up"] + board_size / 2.0]
+            )
+            base_pts = np.vstack([dst.astype(np.float64), base_center])  # (5, 2), tl,tr,br,bl,c
+
+            ext_corners = (
+                cv2.perspectiveTransform(src_extended_corners.reshape(4, 1, 2), matrix)
+                .reshape(4, 2)
+                .astype(np.float64)
+            )
+            ext_center = (
+                cv2.perspectiveTransform(
+                    np.array([[metadata["extended_center_px"]]], dtype=np.float32), matrix
+                )
+                .reshape(2)
+                .astype(np.float64)
+            )
+            ext_pts = np.vstack([ext_corners, ext_center])  # (5, 2)
+
+            self.V, self.vp_residual = estimate_vanishing_point(base_pts, ext_pts)
+
+            # Extension magnitudes at the 5 measured points (corners in tl, tr, br, bl order).
+            corner_mags = np.linalg.norm(ext_corners - dst.astype(np.float64), axis=1)
+            self.magnitude_field = QuadrantMagnitudeField(
+                m_tl=float(corner_mags[0]),
+                m_tr=float(corner_mags[1]),
+                m_br=float(corner_mags[2]),
+                m_bl=float(corner_mags[3]),
+                m_center=float(np.linalg.norm(ext_center - base_center)),
             )
 
     def warp(self, image_path: Path) -> Path:
