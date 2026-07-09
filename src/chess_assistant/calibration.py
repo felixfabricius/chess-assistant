@@ -4,8 +4,10 @@ from datetime import datetime
 from pathlib import Path
 
 import cv2
-from reachy_mini import ReachyMini
-from reachy_mini.utils import create_head_pose
+import numpy as np
+
+# reachy_mini (the `robot` dependency group) is imported lazily inside the functions that need
+# the live robot, so the pure calibration helpers below stay importable without it.
 
 MIN_HEIGHT_MM = -40
 MAX_HEIGHT_MM = 21
@@ -27,6 +29,8 @@ def clamp(value: float, lower: float, upper: float) -> float:
 
 
 def make_safe_pose(height_mm: float, pitch_deg: float):
+    from reachy_mini.utils import create_head_pose
+
     height_mm = clamp(height_mm, MIN_HEIGHT_MM, MAX_HEIGHT_MM)
     pitch_deg = clamp(pitch_deg, MIN_PITCH_DEG, MAX_PITCH_DEG)
 
@@ -41,6 +45,8 @@ def make_safe_pose(height_mm: float, pitch_deg: float):
 
 
 def position_robot(height, pitch):
+    from reachy_mini import ReachyMini
+
     with ReachyMini(media_backend="default") as mini:
         pose = make_safe_pose(height, pitch)[0]
         mini.goto_target(pose, duration=MOVE_DURATION)
@@ -293,6 +299,67 @@ def infer_camera_natural_corner_order(corners_px: dict[str, list[int]]) -> dict:
         "all_scores": scored,
         "ambiguous": scored[0]["score"] == scored[1]["score"],
     }
+
+
+LABEL_ORDER = ["a1", "a8", "h8", "h1"]
+
+
+def derive_center_px(actual_corners_px: dict, order: dict, board_size: int = 400) -> list:
+    """Camera-pixel position of the board centre (board coord (0.5, 0.5)), derived from H.
+
+    ``order`` maps ``tl/tr/br/bl`` to the corresponding square label (from
+    ``camera_natural_orientation``). Derived from the homography rather than clicked, which is
+    more precise than any hand click at the centre.
+    """
+    last = board_size - 1
+    src = np.array(
+        [actual_corners_px[order[pos]] for pos in ["tl", "tr", "br", "bl"]], dtype=np.float32
+    )
+    dst = np.array([[0, 0], [last, 0], [last, last], [0, last]], dtype=np.float32)
+    homography = cv2.getPerspectiveTransform(src, dst)
+    center_warped = np.array([[[last / 2.0, last / 2.0]]], dtype=np.float32)
+    center_px = cv2.perspectiveTransform(center_warped, np.linalg.inv(homography)).reshape(2)
+    return [float(center_px[0]), float(center_px[1])]
+
+
+def build_calibration_metadata(
+    *,
+    existing: dict,
+    actual_corners_px: dict,
+    extended_corners_px: dict,
+    extended_center_px,
+    K,
+    D,
+    image_size,
+    board_size: int = 400,
+    raw_image_path=None,
+) -> dict:
+    """Assemble versioned (v2) calibration metadata, preserving any pre-existing fields.
+
+    Mirrors the ``annotate_existing`` idiom: spread ``**existing`` first, then add/override
+    only the new fields. ``center_px`` is derived from the homography (not a click); the scaled
+    camera intrinsics are cached so the batch/gameplay never re-fetch them from reachy_mini.
+    """
+    order_info = infer_camera_natural_corner_order(actual_corners_px)
+    metadata = {
+        **existing,
+        "calibration_version": 2,
+        "actual_corner_order": LABEL_ORDER,
+        "actual_corners_px": actual_corners_px,
+        "camera_natural_orientation": order_info,
+        "extended_corner_order": LABEL_ORDER,
+        "extended_corners_px": extended_corners_px,
+        "extended_center_px": list(extended_center_px),
+        "center_px": derive_center_px(actual_corners_px, order_info["order"], board_size),
+        "camera_intrinsics": {
+            "K": np.asarray(K, dtype=float).tolist(),
+            "D": np.asarray(D, dtype=float).reshape(-1).tolist(),
+            "image_size": [int(image_size[0]), int(image_size[1])],
+        },
+    }
+    if raw_image_path is not None:
+        metadata["raw_image_path"] = str(raw_image_path)
+    return metadata
 
 
 def annotate_existing(image_path: Path) -> dict | None:

@@ -185,12 +185,16 @@ class SquareGeometry:
 
 
 class Processor:
-    def __init__(self, metadata_path: Path, config_path: Path | None = None) -> None:
+    def __init__(self, metadata_source, config_path: Path | None = None) -> None:
         """
         Store attributes:
         - how many pixels to allocate for padding in each direction
         - size of output image (accounting for padding)
         - matrix to use for image warping (accounting for padding)
+
+        ``metadata_source`` is either a path/str to a ``calibration_metadata.json`` file or an
+        already-loaded calibration dict. The dict form lets the calibration UI build the same
+        geometry from in-progress clicks without touching disk.
         """
         # Get board size of transformed image (excl. padding) from config
         board_size = None
@@ -203,9 +207,12 @@ class Processor:
         square_cutout_size = square_cutout_size if square_cutout_size else 144
         last_coordinate = board_size - 1
 
-        # Load metadata
-        with open(metadata_path, "r", encoding="utf-8") as f:
-            metadata = json.load(f)
+        # Load metadata (file path or already-loaded dict)
+        if isinstance(metadata_source, dict):
+            metadata = metadata_source
+        else:
+            with open(metadata_source, "r", encoding="utf-8") as f:
+                metadata = json.load(f)
 
         # TODO
         # Order of ordered_corners
