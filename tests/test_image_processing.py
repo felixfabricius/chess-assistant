@@ -173,13 +173,19 @@ def test_processor_v2_builds_vanishing_point_and_field(tmp_path):
 
 
 def test_processor_v1_metadata_has_no_v2_geometry():
-    processor = Processor(
-        __import__("pathlib").Path("data/generated/2026-07-01_175334/calibration_metadata.json"),
-        "config.yaml",
-    )
+    # Legacy v1 metadata: no extended_center_px / camera_intrinsics -> no undistortion and no
+    # v2 per-square geometry (behaves exactly as before).
+    v1 = {
+        "camera_natural_orientation": {"order": {"tl": "a8", "tr": "h8", "br": "h1", "bl": "a1"}},
+        "actual_corners_px": {"a8": [700, 300], "h8": [1220, 300], "h1": [1500, 800], "a1": [420, 800]},
+        "extended_corners_px": {"a8": [690, 250], "h8": [1230, 250], "h1": [1470, 760], "a1": [440, 760]},
+    }
+    processor = Processor(v1, None)
     assert processor.is_v2 is False
     assert processor.V is None
     assert processor.extension_field is None
+    assert processor.square_geometry is None
+    assert processor.undistort_map1 is None
 
 
 def test_extension_follows_clicks_even_when_vanishing_point_flips():
