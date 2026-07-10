@@ -65,7 +65,7 @@ def main(config: DictConfig):
         batch_size=config.training.get("batch_size", 64),
         num_workers=dataloader_cfg.get("num_workers", 0),
         persistent_workers=dataloader_cfg.get("persistent_workers", False),
-        pin_memory=dataloader_cfg.get("pin_memory", False) and device == torch.device("cuda") 
+        pin_memory=dataloader_cfg.get("pin_memory", False) and device == torch.device("cuda")
     )
 
     # Hyperparameters

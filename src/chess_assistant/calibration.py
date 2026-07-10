@@ -49,12 +49,9 @@ def make_safe_pose(height_mm: float, pitch_deg: float):
     return pose, height_mm, pitch_deg
 
 
-def position_robot(height, pitch):
-    from reachy_mini import ReachyMini
-
-    with ReachyMini(media_backend="default") as mini:
-        pose = make_safe_pose(height, pitch)[0]
-        mini.goto_target(pose, duration=MOVE_DURATION)
+def position_robot(mini, height, pitch):
+    pose = make_safe_pose(height, pitch)[0]
+    mini.goto_target(pose, duration=MOVE_DURATION)
 
 
 def click_labeled_points_with_review(
@@ -152,11 +149,11 @@ def _log_calibration_summary(calibration_data: dict, config_path) -> None:
 
 
 def calibrate(
+    mini,
     setup_dir: Path = Path("data") / "raw_images",
     config_path="config.yaml",
     annotate_center: bool = False,
 ) -> dict | None:
-    from reachy_mini import ReachyMini
 
     height_mm = OPT_HEIGHT_MM
     pitch_deg = OPT_PITCH_MM
@@ -164,104 +161,103 @@ def calibrate(
     last_sent_height = None
     last_sent_pitch = None
 
-    with ReachyMini(media_backend="default") as mini:
-        while True:
-            frame = mini.media.get_frame()
+    while True:
+        frame = mini.media.get_frame()
 
-            if frame is not None:
-                cv2.imshow("Reachy board view", frame)
+        if frame is not None:
+            cv2.imshow("Reachy board view", frame)
 
-            key = cv2.waitKey(1) & 0xFF
+        key = cv2.waitKey(1) & 0xFF
 
-            new_height_mm = height_mm
-            new_pitch_deg = pitch_deg
+        new_height_mm = height_mm
+        new_pitch_deg = pitch_deg
 
-            if key == ord("w"):
-                new_height_mm += HEIGHT_STEP_MM
-            elif key == ord("s"):
-                new_height_mm -= HEIGHT_STEP_MM
-            elif key == ord("i"):
-                new_pitch_deg += PITCH_STEP_DEG
-            elif key == ord("k"):
-                new_pitch_deg -= PITCH_STEP_DEG
-            elif key == ord(" "):
-                if frame is None:
-                    continue
-
-                frozen_frame = frame.copy()
-                timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-
-                setup_dir.mkdir(parents=True, exist_ok=True)
-                raw_image_path = setup_dir / "raw.png"
-                metadata_path = setup_dir / "calibration_metadata.json"
-
-                # Save the original distorted capture untouched, then do all clicks + geometry
-                # on the undistorted frame.
-                cv2.imwrite(str(raw_image_path), frozen_frame)
-                undistorted, K, D, image_size = undistort_reference_frame(frozen_frame, setup_dir)
-                cv2.destroyWindow("Reachy board view")
-
-                collected = CalibrationUI(
-                    undistorted, config_path, annotate_center=annotate_center
-                ).run()
-                if collected is None:
-                    cv2.destroyAllWindows()
-                    return None
-                base_points, extended_points = collected
-
-                calibration_data = build_calibration_metadata(
-                    existing={
-                        "height_mm": last_sent_height,
-                        "pitch_deg": last_sent_pitch,
-                        "timestamp": timestamp,
-                    },
-                    actual_corners_px=base_points,
-                    extended_corners_px={k: v for k, v in extended_points.items() if k != "center"},
-                    extended_center_px=extended_points["center"],
-                    K=K,
-                    D=D,
-                    image_size=image_size,
-                    raw_image_path=raw_image_path,
-                    center_measured=annotate_center,
-                )
-
-                with metadata_path.open("w", encoding="utf-8") as f:
-                    json.dump(calibration_data, f, indent=2)
-
-                _log_calibration_summary(calibration_data, config_path)
-                print(f"Saved raw image: {raw_image_path}")
-                print(f"Saved calibration metadata: {metadata_path}")
-
-                cv2.destroyAllWindows()
-                return calibration_data
-
-            elif key == ord("q"):
-                cv2.destroyAllWindows()
-                return None
-            else:
+        if key == ord("w"):
+            new_height_mm += HEIGHT_STEP_MM
+        elif key == ord("s"):
+            new_height_mm -= HEIGHT_STEP_MM
+        elif key == ord("i"):
+            new_pitch_deg += PITCH_STEP_DEG
+        elif key == ord("k"):
+            new_pitch_deg -= PITCH_STEP_DEG
+        elif key == ord(" "):
+            if frame is None:
                 continue
 
-            # Clamp and move robot
-            pose, safe_height, safe_pitch = make_safe_pose(new_height_mm, new_pitch_deg)
+            frozen_frame = frame.copy()
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
 
-            if safe_height != new_height_mm or safe_pitch != new_pitch_deg:
-                print(
-                    "Requested pose outside safe range. "
-                    f"Clamped to height={safe_height}, pitch={safe_pitch}"
-                )
+            setup_dir.mkdir(parents=True, exist_ok=True)
+            raw_image_path = setup_dir / "raw.png"
+            metadata_path = setup_dir / "calibration_metadata.json"
 
-            if safe_height != last_sent_height or safe_pitch != last_sent_pitch:
-                print(f"Moving to height={safe_height}, pitch={safe_pitch}")
-                try:
-                    mini.set_target(head=pose, body_yaw=None)
-                    height_mm = safe_height
-                    pitch_deg = safe_pitch
-                    last_sent_height = safe_height
-                    last_sent_pitch = safe_pitch
-                    time.sleep(MOVE_DURATION)
-                except Exception as e:
-                    print("Move failed:", e)
-                    print(f"Keeping previous pose: height={height_mm}, pitch={pitch_deg}")
+            # Save the original distorted capture untouched, then do all clicks + geometry
+            # on the undistorted frame.
+            cv2.imwrite(str(raw_image_path), frozen_frame)
+            undistorted, K, D, image_size = undistort_reference_frame(frozen_frame, setup_dir)
+            cv2.destroyWindow("Reachy board view")
+
+            collected = CalibrationUI(
+                undistorted, config_path, annotate_center=annotate_center
+            ).run()
+            if collected is None:
+                cv2.destroyAllWindows()
+                return None
+            base_points, extended_points = collected
+
+            calibration_data = build_calibration_metadata(
+                existing={
+                    "height_mm": last_sent_height,
+                    "pitch_deg": last_sent_pitch,
+                    "timestamp": timestamp,
+                },
+                actual_corners_px=base_points,
+                extended_corners_px={k: v for k, v in extended_points.items() if k != "center"},
+                extended_center_px=extended_points["center"],
+                K=K,
+                D=D,
+                image_size=image_size,
+                raw_image_path=raw_image_path,
+                center_measured=annotate_center,
+            )
+
+            with metadata_path.open("w", encoding="utf-8") as f:
+                json.dump(calibration_data, f, indent=2)
+
+            _log_calibration_summary(calibration_data, config_path)
+            print(f"Saved raw image: {raw_image_path}")
+            print(f"Saved calibration metadata: {metadata_path}")
+
+            cv2.destroyAllWindows()
+            return calibration_data
+
+        elif key == ord("q"):
+            cv2.destroyAllWindows()
+            return None
+        else:
+            continue
+
+        # Clamp and move robot
+        pose, safe_height, safe_pitch = make_safe_pose(new_height_mm, new_pitch_deg)
+
+        if safe_height != new_height_mm or safe_pitch != new_pitch_deg:
+            print(
+                "Requested pose outside safe range. "
+                f"Clamped to height={safe_height}, pitch={safe_pitch}"
+            )
+
+        if safe_height != last_sent_height or safe_pitch != last_sent_pitch:
+            print(f"Moving to height={safe_height}, pitch={safe_pitch}")
+            try:
+                mini.set_target(head=pose, body_yaw=None)
+                height_mm = safe_height
+                pitch_deg = safe_pitch
+                last_sent_height = safe_height
+                last_sent_pitch = safe_pitch
+                time.sleep(MOVE_DURATION)
+            except Exception as e:
+                print("Move failed:", e)
+                print(f"Keeping previous pose: height={height_mm}, pitch={pitch_deg}")
 
 
 def infer_camera_natural_corner_order(corners_px: dict[str, list[int]]) -> dict:

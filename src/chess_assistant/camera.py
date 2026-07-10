@@ -7,7 +7,7 @@ from datetime import datetime
 import cv2
 from reachy_mini import ReachyMini
 
-def capture_image(output_dir: Path) -> Path:
+def capture_image(mini, output_dir: Path) -> Path:
     """
     Capture on frame from Reachy's camera and save it as a PNG.
     """
@@ -19,8 +19,7 @@ def capture_image(output_dir: Path) -> Path:
     image_dir.mkdir()
     image_path = image_dir / "image.png"
 
-    with ReachyMini(media_backend="default") as mini:
-        frame = mini.media.get_frame()
+    frame = mini.media.get_frame()
 
     # get_frame() already returns a BGR array (calibration.py saves it directly
     # and those images are correctly coloured; the previous cvtColor(RGB2BGR)

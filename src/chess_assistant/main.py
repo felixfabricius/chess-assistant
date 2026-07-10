@@ -6,16 +6,20 @@ from chess_assistant.camera import capture_image
 from chess_assistant.vision import BoardEstimator
 from chess_assistant.game import ChessGame
 from chess_assistant.image_processing import Processor
+from chess_assistant.antennas_input import AntennasInputDetector
 
 
 import json
+import time
 from datetime import datetime
+from reachy_mini import ReachyMini
 
-def main() -> None:
+def main(mini) -> None:
+    
     config = OmegaConf.load("config.yaml")
 
-    setup_dir, pixel_coordinates = setup()
-    image_processor = Processor(setup_dir / "calibration_metadata.json", "config.yaml")
+    setup_dir, pixel_coordinates = setup(mini)
+    image_processor = Processor(mini, setup_dir / "calibration_metadata.json", "config.yaml")
     board_estimator = BoardEstimator(config)
     
     game = ChessGame()
@@ -23,8 +27,13 @@ def main() -> None:
     # Build game loop
     i = 0
     while True:
+        # Use antennas to get camera input
+        # Perhaps we can use camera orientation to determine on which side the white player is
+        # sitting; and then the AntennasInput class can keep track of everyhing else.
+        # Including on which side the next input needs to occur.
+
         # Capture image from camera
-        image_dir = capture_image(setup_dir)
+        image_dir = capture_image(mini, setup_dir)
         # Warp and cut out squares
         warped_image_path = image_processor.warp(image_dir / "image.png")
         squares_dir = image_processor.cutout(warped_image_path)
@@ -73,7 +82,5 @@ def main() -> None:
         json.dump(metadata, f, indent=2)
 
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) > 1:
-
-    main()
+    with ReachyMini() as mini:
+        main(mini)

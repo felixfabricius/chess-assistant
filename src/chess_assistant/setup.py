@@ -6,7 +6,7 @@ import json
 
 from chess_assistant.calibration import calibrate, position_robot
 
-def setup():
+def setup(mini):
     with open("config.yaml", "r") as f:
         config = yaml.safe_load(f)
     root_data_folder = Path(config.get("root_data_folder", "data"))
