@@ -18,16 +18,26 @@ def setup(mini):
         setup_dir.mkdir(parents=True)
 
         setup_data= (
-            config.get("setup_folder", {}).get("measurements", {}) 
+            config.get("setup_folder", {}).get("measurements", {})
             | {key: config.get("setup_folder", {}).get(key) for key in ["chessboard", "documentation_image"]}
         )
-        calibration_data = calibrate(setup_dir)
-        
+        annotate_center = config.get("setup_folder", {}).get("annotate_center", True)
+        calibration_data = calibrate(mini, setup_dir, annotate_center=annotate_center)
+        if calibration_data is None:
+            raise RuntimeError("Calibration was aborted before any points were collected.")
+
         with open(setup_dir / "metadata.json", "w", encoding="utf-8") as f:
             json.dump(setup_data | calibration_data, f, indent=2)
 
-        pixel_coordinates = {field: calibration_data[field] for field in ["a1", "a8", "h8", "h1"]}
-    
+        # v2 metadata stores the clicked board corners nested under "actual_corners_px".
+        pixel_coordinates = {
+            field: calibration_data["actual_corners_px"][field]
+            for field in ["a1", "a8", "h8", "h1"]
+        }
+
+        # The chosen capture pose, replayed before every gameplay image (see main.py).
+        robot_pose = (calibration_data["height_mm"], calibration_data["pitch_deg"])
+
     else:
         # assert that root data folder exists and contains at least one file
         assert root_data_folder.is_dir()
@@ -40,11 +50,17 @@ def setup(mini):
         with open(setup_dir / "metadata.json", "r", encoding="utf-8") as f:
             metadata = json.load(f)
         
-        # Position robot correctly, and return the coordinates
-        position_robot(metadata["height"], metadata["pitch"])
+        # Position robot correctly, and return the coordinates. The v2 metadata stores the
+        # robot pose under "height_mm"/"pitch_deg" and the board corners under "actual_corners_px".
+        position_robot(mini, metadata["height_mm"], metadata["pitch_deg"])
 
-        pixel_coordinates = {field: metadata[field] for field in ["a1", "a8", "h8", "h1"]}
+        pixel_coordinates = {
+            field: metadata["actual_corners_px"][field]
+            for field in ["a1", "a8", "h8", "h1"]
+        }
 
-    return setup_dir, pixel_coordinates
+        robot_pose = (metadata["height_mm"], metadata["pitch_deg"])
+
+    return setup_dir, pixel_coordinates, robot_pose
 
 

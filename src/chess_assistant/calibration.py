@@ -54,6 +54,15 @@ def position_robot(mini, height, pitch):
     mini.goto_target(pose, duration=MOVE_DURATION)
 
 
+def move_to_capture_pose(mini, height_mm, pitch_deg):
+    """Immediately snap the head to the stored calibration pose (``set_target``, not the
+    smooth ``goto_target``) so every gameplay image is captured from the exact position the
+    board was calibrated at. A short settle sleep lets the head physically arrive first."""
+    pose = make_safe_pose(height_mm, pitch_deg)[0]
+    mini.set_target(head=pose, body_yaw=None)
+    time.sleep(MOVE_DURATION)
+
+
 def click_labeled_points_with_review(
     frame,
     labels: list[str],
@@ -158,8 +167,13 @@ def calibrate(
     height_mm = OPT_HEIGHT_MM
     pitch_deg = OPT_PITCH_MM
 
-    last_sent_height = None
-    last_sent_pitch = None
+    # Move to the initial pose right away so the live view — and any capture taken before the
+    # user nudges the head — matches the pose we store. Without this the robot sits at its rest
+    # pose while the metadata would claim the (untouched) OPT_* values.
+    pose, height_mm, pitch_deg = make_safe_pose(height_mm, pitch_deg)
+    mini.set_target(head=pose, body_yaw=None)
+    last_sent_height = height_mm
+    last_sent_pitch = pitch_deg
 
     while True:
         frame = mini.media.get_frame()
@@ -205,10 +219,12 @@ def calibrate(
                 return None
             base_points, extended_points = collected
 
+            # Store the pose the robot is actually holding right now (kept in sync with
+            # last_sent_* below); this is the chosen capture position that gameplay replays.
             calibration_data = build_calibration_metadata(
                 existing={
-                    "height_mm": last_sent_height,
-                    "pitch_deg": last_sent_pitch,
+                    "height_mm": height_mm,
+                    "pitch_deg": pitch_deg,
                     "timestamp": timestamp,
                 },
                 actual_corners_px=base_points,

@@ -55,7 +55,6 @@ class AntennasInputDetector:
         mini.goto_target(antennas=np.deg2rad([-self.baseline_rotation, self.baseline_rotation]), duration=0.5)
 
     def detect_input(self, type: str) -> bool:
-        breakpoint()
         # Look for one of two input patterns:
         # Move antenna down to make move; move antenna up to reject move
         assert type in ["move_made", "move_estimate_rejected"]

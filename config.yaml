@@ -1,6 +1,9 @@
 root_data_folder: data
 setup_folder:
   create_new: True
+  # Click a dedicated centre piece-top during calibration (new v2 style) instead of
+  # interpolating the centre from the four extended corners.
+  annotate_center: True
   measurements:
     # Distance from center of chessboard to nearest point of base of robot from birds eye view in cm
     dist: 25 

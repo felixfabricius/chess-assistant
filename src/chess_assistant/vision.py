@@ -111,7 +111,7 @@ def infer_fen_from_image(image_path: Path, model: str = "claude-opus-4-8", promp
     return message.content[0].text
 
 class BoardEstimator:
-    def __init__(self, model_type: str = "CNN", config: DictConfig | None = None, calibration_metadata_path: Path | None = None, model_path = None, device = None):
+    def __init__(self, model_type: str = "CNN", config: DictConfig | None = None, calibration_metadata_path: Path | None = None, model_path = None, device = None, model = None):
         """
         Keep track of:
         - recent board estimate

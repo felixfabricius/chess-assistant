@@ -15,7 +15,7 @@ PROMPT_START = (
     "You are a witty, British chess commentator. "
     "I will provide you with a move, the centipawn loss associated with that move (higher means move was worse; best is zero), "
     "and the piece that moved."
-    "Based on that, return a short comment. Applaud solid moves, and roast bad ones."
+    "Based on that, return a SHORT comment. Applaud solid moves, and roast bad ones."
     "Return only the comment."
 )
 def format_uci_for_speech(uci_move: str) -> str:
