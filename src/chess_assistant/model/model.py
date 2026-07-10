@@ -237,27 +237,27 @@ class SquareClassifierMultiHead(nn.Module):
             self.relu,
             self.max_pool_1
         )
+        # Shallower, more local residual branch than SquareClassifier2's. RF calc on the
+        # 18x18 map: 3x3(d1) -> depthwise 3x3(d2) -> 1x1 gives a 7-cell / ~70px receptive
+        # field (~1.4 board squares), keeping features focused on the target piece rather
+        # than integrating neighbouring squares (the dilation=5 version reached ~166px, more
+        # than the whole 144px crop). `dilation` on the depthwise conv is the locality knob
+        # (d=2 -> RF 7 cells; d=3 -> RF 9 cells if tall-piece tops get clipped).
         self.image_feature_extraction_2 = nn.Sequential(
-            nn.Conv2d(in_channels=128, out_channels=128, kernel_size=3, padding=1, bias=False),
+            # local channel-mixing conv
+            nn.Conv2d(128, 128, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(128),
             self.relu,
-            # Increase receptive field of neurons in final layer through a series
-            # of depthwise dilated convolutions, followed by a channel mix-in
-            nn.Conv2d(128, 128, kernel_size=3, groups=128, padding=1),
-            nn.BatchNorm2d(128),
-            self.relu,
+            # one modest-dilation depthwise conv for a little local context
             nn.Conv2d(128, 128, kernel_size=3, groups=128, dilation=2, padding=2, bias=False),
             nn.BatchNorm2d(128),
             self.relu,
-            nn.Conv2d(128, 128, kernel_size=3, groups=128, dilation=5, padding=5, bias=False),
-            nn.BatchNorm2d(128),
-            self.relu,
-            # 1x1 Channel mix-in
-            nn.Conv2d(128, 128, kernel_size=1, groups=1, dilation=1, padding=0, bias=False),
+            # 1x1 channel mix-in
+            nn.Conv2d(128, 128, kernel_size=1, bias=False),
             nn.BatchNorm2d(128),
         )
         # Initialise the weights (scale) of the last batch norm to zero; so by default
-        # image_feature_extraction_2 is the identiy
+        # image_feature_extraction_2 is the identity
         nn.init.zeros_(self.image_feature_extraction_2[-1].weight)
 
         # Adaptive Average Pooling at end; 2x2 to preserve SOME spatial structure
