@@ -36,12 +36,24 @@ def test_reconstruct_sums_to_one():
     assert torch.allclose(logprobs.exp().sum(dim=-1), torch.ones(5), atol=1e-5)
 
 def test_reconstruct_argmax_unambiguous():
-    # (b) a very confident "non-empty, black, knight" should argmax to TARGET_MAP["n"]
-    logit_empty = torch.tensor([-10.0])                                     # P(empty) ~ 0
+    # (b) a very confident "non-empty, black, knight" should argmax to TARGET_MAP["n"].
+    # sigmoid(logit_empty) == P(piece), so a confident piece has a large POSITIVE logit_empty.
+    logit_empty = torch.tensor([10.0])                                      # P(piece) ~ 1
     logits_color = torch.tensor([[-10.0, 10.0]])                            # black
     logits_type = torch.tensor([[-10.0, -10.0, -10.0, -10.0, 10.0, -10.0]])  # N (type index 4)
     logprobs = reconstruct_13way_logprobs(logit_empty, logits_color, logits_type)
     assert logprobs.argmax(dim=-1).item() == TARGET_MAP["n"]
+
+def test_reconstruct_occupancy_direction():
+    # Guards the occupancy sign: sigmoid(logit_empty) == P(piece) (empty head trained on is_piece).
+    color = torch.tensor([[10.0, -10.0]])                             # white
+    king = torch.tensor([[10.0, -10.0, -10.0, -10.0, -10.0, -10.0]])  # K
+    # confident piece (large +ve logit_empty) -> argmax is a piece, not empty
+    piece = reconstruct_13way_logprobs(torch.tensor([10.0]), color, king)
+    assert piece.argmax(dim=-1).item() == TARGET_MAP["K"]
+    # confident empty (large -ve logit_empty) -> argmax is empty regardless of the color/type heads
+    empty = reconstruct_13way_logprobs(torch.tensor([-10.0]), color, king)
+    assert empty.argmax(dim=-1).item() == TARGET_MAP["empty"]
 
 def test_reconstruct_matches_cross_entropy():
     # (c) feeding the output through CrossEntropyLoss reproduces -log(p_target) computed

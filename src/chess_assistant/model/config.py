@@ -41,8 +41,11 @@ def reconstruct_13way_logprobs(logit_empty, logits_color, logits_type):
     Numerically stable (logsigmoid/log_softmax, no epsilon-clamping needed). Safe to feed
     directly into nn.CrossEntropyLoss or argmax, exactly like the old single-head logits.
     """
-    log_p_empty = F.logsigmoid(logit_empty)            # log P(empty)
-    log_p_nonempty = F.logsigmoid(-logit_empty)        # log(1 - P(empty))
+    # The empty head is trained with BCEWithLogitsLoss against `is_piece` (1 = piece), so
+    # sigmoid(logit_empty) == P(piece). `logit_empty` is therefore a piece-logit despite its
+    # name, and the empty/non-empty branches must be assigned accordingly.
+    log_p_nonempty = F.logsigmoid(logit_empty)         # log P(non-empty) = log sigmoid(logit_empty) = log P(piece)
+    log_p_empty = F.logsigmoid(-logit_empty)           # log P(empty)     = log(1 - P(piece))
     log_p_color = F.log_softmax(logits_color, dim=-1)  # (..., 2)
     log_p_type = F.log_softmax(logits_type, dim=-1)    # (..., 6)
 
