@@ -249,7 +249,7 @@ class SquareClassifierMultiHead(nn.Module):
             nn.Conv2d(128, 128, kernel_size=3, groups=128, dilation=2, padding=2, bias=False),
             nn.BatchNorm2d(128),
             self.relu,
-            nn.Conv2d(128, 128, kernel_size=3, groups=128, dilation=5, padding=5, bias=False),
+            nn.Conv2d(128, 128, kernel_size=3, groups=128, dilation=3, padding=3, bias=False),
             nn.BatchNorm2d(128),
             self.relu,
             # 1x1 Channel mix-in
