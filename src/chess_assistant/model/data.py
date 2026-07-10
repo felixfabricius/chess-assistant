@@ -9,12 +9,12 @@ from torchvision.transforms import v2
 
 from pathlib import Path, PureWindowsPath
 
-from chess_assistant.model.config import TARGET_MAP
+from chess_assistant.model.config import decompose_label, TOP_LEFT_OHE_MAP
 
 TRAIN_TRANSFORM = v2.Compose([
     v2.ToImage(), 
     v2.ToDtype(torch.float32, scale=True),
-    v2.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.15, hue=0.03),
+    v2.ColorJitter(brightness=0.4, contrast=0.3, saturation=0.15, hue=0.03),
     v2.GaussianBlur(kernel_size=5, sigma=(1e-3, 1)), # kernel_size 5, so this is wider than the conv kernels
     v2.GaussianNoise(mean=0.0, sigma=0.02),
     v2.RandomAffine(degrees=0, translate=(0.04, 0.04), scale=(0.93, 1.07))
@@ -27,9 +27,9 @@ class squareDataset(Dataset):
         self, 
         csv_path: Path = Path("data/generated/data.csv"), 
         split: str = "train",
-        train_transform= v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)]), 
+        train_transform= v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)]),
         eval_transform = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)]),
-        target_transform = TARGET_MAP.__getitem__,
+        target_transform = decompose_label,
     ):
         if split not in ["train", "val", "test"]:
             raise ValueError(f"Split must be of type train, val or test. Got {split}.")
@@ -82,33 +82,25 @@ class squareDataset(Dataset):
         if not isinstance(image, torch.Tensor):
             raise TypeError("images must be torch tensors. Pass transform to ensure.")
 
-        label = self.data[idx, "label"]
-        if self.target_transform:
-            label = self.target_transform(label)
+        # Decompose the 13-way label into per-head targets:
+        #   is_piece (float 0/1), color_target (0/1 or IGNORE_INDEX), type_target (0..5 or IGNORE_INDEX)
+        raw_label = self.data[idx, "label"]
+        is_piece, color_target, type_target = self.target_transform(raw_label)
 
-        # what metadata do we want?
-        # OHE version of which square is at the top; this can be accessed using setup_id -> setup calibration metadata 
-        # then need to access square metadata; access using 
-        metadata = []
-        square_metadata_path = img_path.parent / f"{square}_metadata.json"
-        with open(square_metadata_path, "r") as f:
-            square_metadata = json.load(f)
-            metadata.extend([square_metadata[key] for key in ["top", "left"]])
-        
+        # Metadata: one-hot of which board corner is top-left in the camera image (the board's
+        # orientation), cached per setup. This replaced the old per-square / per-corner-pixel
+        # metadata, which let the model fingerprint (and memorise) individual setups.
+        metadata = torch.zeros(4, dtype=torch.float32)
+
         setup_id = self.data[idx, "setup_id"]
         if setup_id not in self.setup_metadata_store:
             setup_metadata_path = Path("data/generated") / setup_id / "calibration_metadata.json"
             with open(setup_metadata_path, "r") as f:
                 setup_metadata = json.load(f)
-            self.setup_metadata_store[setup_id] = [
-                px_coordinate 
-                for corner in ["a1", "a8", "h8", "h1"] 
-                for px_coordinate in setup_metadata["actual_corners_px"][corner]
-            ]
-        metadata.extend(self.setup_metadata_store[setup_id])
-        metadata = torch.tensor(metadata, dtype=torch.float32)
-        
-        return image, metadata, label
+            self.setup_metadata_store[setup_id] = setup_metadata["camera_natural_orientation"]["order"]["tl"]
+        metadata[TOP_LEFT_OHE_MAP[self.setup_metadata_store[setup_id]]] = 1
+
+        return image, metadata, is_piece, color_target, type_target
 
         # TODO: for val/test we may also want image_id (to test if equal for all); valid_game_position; previous_board_fen; board_fen; move_uci
         # Issue with the dataloader approach to "randomly" get just images from one board position in one batch
@@ -128,9 +120,9 @@ def create_dataloader(
     num_workers: int = 0,
     persistent_workers: bool = False,
     pin_memory: bool = False,
-    train_transform = TRAIN_TRANSFORM, 
+    train_transform = TRAIN_TRANSFORM,
     eval_transform = EVAL_TRANSFORM,
-    target_transform = TARGET_MAP.__getitem__,
+    target_transform = decompose_label,
     csv_path = Path("data/generated/data.csv"),
 ):  
     if split not in ["train", "val", "test"]:

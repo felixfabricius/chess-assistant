@@ -19,7 +19,7 @@ import numpy as np
 from omegaconf import OmegaConf, DictConfig
 
 from chess_assistant.config import SQUARES
-from chess_assistant.model.config import INVERSE_TARGET_MAP
+from chess_assistant.model.config import INVERSE_TARGET_MAP, TARGET_MAP, reconstruct_13way_logprobs, TOP_LEFT_OHE_MAP
 from chess_assistant.model.data import EVAL_TRANSFORM
 from chess_assistant.model.model import SquareClassifierMultiHead
 
@@ -145,11 +145,8 @@ class BoardEstimator:
             self.device = torch.device(device) if device is not None else torch.device("cpu")
             with open(calibration_metadata_path, "r") as f:
                 calibration_metadata = json.load(f)
-            self.calibration_metadata = [
-                px_coordinate 
-                for corner in ["a1", "a8", "h8", "h1"] 
-                for px_coordinate in calibration_metadata["actual_corners_px"][corner]
-            ]
+            # The model's only metadata: which board corner is top-left in the image.
+            self.top_left_corner = calibration_metadata["camera_natural_orientation"]["order"]["tl"]
             self.model = model.to(self.device)
         self.model_type = model_type
 
@@ -197,16 +194,12 @@ class BoardEstimator:
             square_dir = image_path.parent
             setup_dir = square_dir.parent.parent.parent
 
-            # For the metadata:
-            metadata = []
-            with open(square_dir / f"{square}_metadata.json", "r") as f:
-                square_metadata = json.load(f)
-            metadata.extend([square_metadata[key] for key in ["top", "left"]])
-            metadata.extend(self.calibration_metadata)
-            metadata = torch.tensor(metadata, dtype=torch.float32).unsqueeze(dim=0).to(self.device) # unsqueeze to add batch dimension; TODO: check if necessary
-            assert metadata.shape == (1, 10)
-            # TODO: make this more efficient. Perhaps no need to load the setup metadata
-            # so often. Can perhaps save this in the board estimator class.
+            # Metadata: one-hot of which board corner is top-left in the image. Must match
+            # training (model/data.py) - both use TOP_LEFT_OHE_MAP.
+            metadata = torch.zeros(1, 4, dtype=torch.float32)
+            metadata[0, TOP_LEFT_OHE_MAP[self.top_left_corner]] = 1
+            metadata = metadata.to(self.device)
+            assert metadata.shape == (1, 4)
 
             # For the image
             image = np.load(square_dir / f"{square}_masked.npy")
@@ -217,20 +210,32 @@ class BoardEstimator:
             image = torch.cat([rgb, mask]).unsqueeze(dim=0).to(self.device)
             assert image.shape == (1, 4, 144, 144)
             
-            logits = self.model(image, metadata).squeeze()
-            # Shape of the non-squeezed logits would be (1, 13)
-
-            # Now turn the logits into the square prediction;
-            # Perhaps just maintain the raw logits?
+            # Now turn the model output into the square prediction;
+            # in both cases we store logit-like values (raw logits or reconstructed
+            # log-probabilities), which game.py feeds into its own CrossEntropyLoss.
             square_estimate = SquareEstimate(
                 image_path=image_path,
                 copied=False,
                 copied_from=None
             )
 
-            for label in INVERSE_TARGET_MAP.keys():
-                # label takes values in 0, ..., 12
-                setattr(square_estimate, INVERSE_TARGET_MAP[label], logits[label].item())
+            if hasattr(self.model, "empty_head"):
+                # Multi-head model (model 3): recombine the three heads into 13-way
+                # log-probabilities. softmax(log p) == p and the reconstructed probs sum to
+                # 1, so log p is a drop-in for the old single-head logits under the softmax
+                # game.py re-applies downstream.
+                logit_empty, logits_color, logits_type = self.model(image, metadata)
+                logprobs = reconstruct_13way_logprobs(
+                    logit_empty.squeeze(0), logits_color.squeeze(0), logits_type.squeeze(0)
+                )
+                for label, idx in TARGET_MAP.items():
+                    setattr(square_estimate, label, logprobs[idx].item())
+            else:
+                logits = self.model(image, metadata).squeeze()
+                # Shape of the non-squeezed logits would be (1, 13)
+                for label in INVERSE_TARGET_MAP.keys():
+                    # label takes values in 0, ..., 12
+                    setattr(square_estimate, INVERSE_TARGET_MAP[label], logits[label].item())
 
             return square_estimate
 

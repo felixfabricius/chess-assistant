@@ -7,8 +7,16 @@ hydra:
     dir: .
   output_subdir: null
 
-model: 2
+model: 3
 note: ""
+
+# Combination weights for the three heads of the multi-head model (model 3): the
+# back-propagated train loss and the eval/total diagnostic are
+#   loss_weights.empty * empty_loss + loss_weights.color * color_loss + loss_weights.type * type_loss
+loss_weights:
+  empty: 1.0
+  color: 1.0
+  type: 1.0
 
 data:
   weighting: inverse_root
