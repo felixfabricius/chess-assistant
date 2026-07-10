@@ -21,6 +21,7 @@ from omegaconf import OmegaConf, DictConfig
 from chess_assistant.config import SQUARES
 from chess_assistant.model.config import INVERSE_TARGET_MAP
 from chess_assistant.model.data import EVAL_TRANSFORM
+from chess_assistant.model.model import SquareClassifierMultiHead
 
 load_dotenv()
 
@@ -137,7 +138,9 @@ class BoardEstimator:
             assert calibration_metadata_path is not None
             assert model_path is not None or model is not None
             if model is None:
-                model = torch.load(model_path, ) 
+                model = SquareClassifierMultiHead()
+                state_dict = torch.load(model_path, map_location="cpu")["model_state_dict"]
+                model.load_state_dict(state_dict)
             assert device in ["cpu", "cuda", None, torch.device("cpu"), torch.device("cuda")]
             self.device = torch.device(device) if device is not None else torch.device("cpu")
             with open(calibration_metadata_path, "r") as f:

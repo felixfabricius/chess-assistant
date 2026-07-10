@@ -23,7 +23,7 @@ def main(mini) -> None:
     setup_dir, pixel_coordinates = setup(mini)
     calibration_metadata_path = setup_dir / "calibration_metadata.json"
     image_processor = Processor(mini, calibration_metadata_path, "config.yaml")
-    board_estimator = BoardEstimator("CNN", config, calibration_metadata_path, , device="cpu")
+    board_estimator = BoardEstimator("CNN", config, calibration_metadata_path, model_path=config.model_path, device="cpu")
     input_detector = AntennasInputDetector(mini, calibration_metadata_path)
     speaker = Speaker(mini)
     game = ChessGame()

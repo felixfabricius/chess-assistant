@@ -22,7 +22,7 @@ image_processing:
 
 vision:
   model: CNN
-  
+  model_path: artifacts/model_and_optimizer-v18/model_rd68eyo6.pt
   model_version: claude-opus-4-8
   prompt_version: 1
   
