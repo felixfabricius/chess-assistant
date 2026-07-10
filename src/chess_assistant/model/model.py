@@ -57,15 +57,9 @@ class SquareClassifier(nn.Module):
             self.relu
         )        
 
-        ### Preprocessing of additional info: small MLP
-        self.mlp_1 = nn.Sequential(
-            nn.Linear(10, 16),
-            self.relu
-        )
-
         ### Final MLP
         self.mlp_2 = nn.Sequential(
-            nn.Linear(528, 256),
+            nn.Linear(512 + 4, 256),
             self.relu,
             nn.Linear(256, 128),
             self.relu,
@@ -81,8 +75,7 @@ class SquareClassifier(nn.Module):
             ],
             dim=1
         )
-        metadata_features = self.mlp_1(metadata)
-        mlp_input = torch.cat([image_features, metadata_features], dim=1)
+        mlp_input = torch.cat([image_features, metadata], dim=1)
         logits = self.mlp_2(mlp_input)
         return logits
 
@@ -151,16 +144,9 @@ class SquareClassifier2(nn.Module):
         self.max_pool = nn.AdaptiveMaxPool2d((2, 2))
         self.avg_pool = nn.AdaptiveAvgPool2d((2, 2))
 
-        ### Preprocessing of additional info: small MLP
-        self.bn1 = nn.BatchNorm1d(10)
-        self.mlp_1 = nn.Sequential(
-            nn.Linear(10, 16),
-            self.relu
-        )
-
         ### Final MLP
         self.mlp_2 = nn.Sequential(
-            nn.Linear(1024+16, 128),
+            nn.Linear(1024+4, 128),
             self.relu,
             nn.Linear(128, 64),
             self.relu,
@@ -192,9 +178,10 @@ class SquareClassifier2(nn.Module):
         # Won't worry about that now.
         # And even if they do, that will just make variance 0; so information loss for that feature
         # mean is also 0 for everything. Not too terrible. (Though if highly imbalanced, might blow up)
-        normed_metadata = self.bn1(metadata)
-        metadata_features = self.mlp_1(normed_metadata)
-        mlp_input = torch.cat([image_features, metadata_features], dim=1)
+
+        # This is no longer necessary since metadata is now simply OHE of top left corner
+
+        mlp_input = torch.cat([image_features, metadata], dim=1)
         logits = self.mlp_2(mlp_input)
         return logits
 
@@ -264,21 +251,14 @@ class SquareClassifierMultiHead(nn.Module):
         self.max_pool = nn.AdaptiveMaxPool2d((2, 2))
         self.avg_pool = nn.AdaptiveAvgPool2d((2, 2))
 
-        ### Preprocessing of additional info: small MLP
-        self.bn1 = nn.BatchNorm1d(10)
-        self.mlp_1 = nn.Sequential(
-            nn.Linear(10, 16),
-            self.relu
-        )
-
         ### Three heads over the shared 1040-dim mlp_input (1024 image + 16 metadata).
         # empty / color are easy -> a single Linear each.
-        self.empty_head = nn.Linear(1024 + 16, 1)
-        self.color_head = nn.Linear(1024 + 16, 2)
+        self.empty_head = nn.Linear(1024 + 4, 1)
+        self.color_head = nn.Linear(1024 + 4, 2)
         # type is the hardest sub-task (still pawn-imbalanced even after pooling colors)
         # -> give it a bit more capacity with one hidden layer.
         self.type_head = nn.Sequential(
-            nn.Linear(1024 + 16, 64),
+            nn.Linear(1024 + 4, 64),
             self.relu,
             nn.Linear(64, 6)
         )
@@ -294,9 +274,7 @@ class SquareClassifierMultiHead(nn.Module):
             ),
             dim=1
         )
-        normed_metadata = self.bn1(metadata)
-        metadata_features = self.mlp_1(normed_metadata)
-        mlp_input = torch.cat([image_features, metadata_features], dim=1)
+        mlp_input = torch.cat([image_features, metadata], dim=1)
 
         logit_empty = self.empty_head(mlp_input).squeeze(-1)  # (batch,)
         logits_color = self.color_head(mlp_input)             # (batch, 2)

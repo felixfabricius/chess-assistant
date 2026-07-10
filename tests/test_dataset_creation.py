@@ -21,7 +21,7 @@ def test_dataset_getitem(dataset):
     assert INVERSE_TYPE_MAP[type_target] == "R"
 
 def test_metadata_shape(dataset):
-    assert dataset[0][1].shape == (10,) # 5 coordinates: 4 board corners, and top left corner of square
+    assert dataset[0][1].shape == (4,) # one-hot of which board corner is top-left in the image
 
 ### Test transformations
 def test_transform(dataset):
@@ -65,7 +65,7 @@ def test_dataloader(batch_size):
     # (image, metadata, is_piece, color_target, type_target)
     assert len(batch) == 5
     assert batch[0].shape == (batch_size, 4, 144, 144)
-    assert batch[1].shape == (batch_size, 10)
+    assert batch[1].shape == (batch_size, 4)
     assert batch[2].shape == (batch_size,)
     assert batch[3].shape == (batch_size,)
     assert batch[4].shape == (batch_size,)

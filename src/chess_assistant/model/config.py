@@ -18,6 +18,12 @@ INVERSE_COLOR_MAP = {v: k for k, v in COLOR_MAP.items()}
 TYPE_MAP = {"K": 0, "Q": 1, "R": 2, "B": 3, "N": 4, "P": 5}
 INVERSE_TYPE_MAP = {v: k for k, v in TYPE_MAP.items()}
 
+# One-hot index for which board corner is top-left in the camera image
+# (calibration_metadata["camera_natural_orientation"]["order"]["tl"]). This is the model's
+# only metadata now. Shared between training (model/data.py) and inference (vision.py) so the
+# two encodings can never drift apart.
+TOP_LEFT_OHE_MAP = {"a8": 0, "a1": 1, "h1": 2, "h8": 3}
+
 
 def decompose_label(label: str) -> tuple[float, int, int]:
     """

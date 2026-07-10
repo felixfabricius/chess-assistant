@@ -35,7 +35,8 @@ def test_estimate_board(board_estimator):
 @pytest.fixture
 def multihead_board_estimator(scope="module"):
     model = SquareClassifierMultiHead()
-    # eval() is required: BatchNorm1d(10) errors on a batch-size-1 forward in train mode.
+    # eval() so BatchNorm uses running stats (inference-appropriate); metadata is now a
+    # plain one-hot with no BatchNorm, but the conv trunk still has BatchNorm2d.
     model.eval()
     return BoardEstimator(
         model_type="CNN",

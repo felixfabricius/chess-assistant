@@ -22,7 +22,7 @@ def main() -> None:
 
     # Build game loop
     i = 0
-    while True:
+    while not game.board.is_checkmate():
         # Capture image from camera
         image_dir = capture_image(setup_dir)
         # Warp and cut out squares
