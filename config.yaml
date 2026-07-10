@@ -21,7 +21,8 @@ image_processing:
   square_cutout_size: 144
 
 vision:
-  model: LLM
+  model: CNN
+  
   model_version: claude-opus-4-8
   prompt_version: 1
   

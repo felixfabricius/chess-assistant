@@ -1,9 +1,12 @@
 import chess
+import chess.engine
 import torch
 from torch import nn
 
 from chess_assistant.config import SQUARES, PIECES
 from chess_assistant.model.config import TARGET_MAP, INVERSE_TARGET_MAP
+
+STOCKFISH_PATH = r"C:\Users\User\AppData\Local\Microsoft\WinGet\Packages\Stockfish.Stockfish_Microsoft.Winget.Source_8wekyb3d8bbwe\stockfish\stockfish-windows-x86-64-avx2.exe"
 
 class ChessGame:
     """
@@ -13,7 +16,7 @@ class ChessGame:
     Perhaps also keep track of multiple moves. 
     (Easier to debug: if it's not a specific move that I think it is, can try a new one.)
     """
-    def __init__(self, fen: str | None = None, model_type: str = "LLM"):
+    def __init__(self, fen: str | None = None, model_type: str = "LLM", depth=16):
         fen = fen if fen is not None else "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
         self.board = chess.Board(fen=fen) 
             # allow for passing of FEN to simulate continuation of game from an 
@@ -22,9 +25,18 @@ class ChessGame:
         self.model_type = model_type
         if self.model_type == "CNN":
             self.loss_fn = nn.CrossEntropyLoss()
-    
+        self.engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
+        self.depth = depth
+            # maybe increase to 18 eventually
+        self.recent_position_score = self.eval_position()
+
     def fen(self):
         return self.board.fen()
+
+    def eval_position(self):
+        info = self.engine.analyse(self.board, chess.engine.Limit(depth=self.depth))
+        score = info["score"].white().score(mate_score=10000)
+        return score  # centipawns, from White's perspective
 
     def estimate_move(self, board_estimate):
         # board_estimate object has 64 fields (a1, ...)
@@ -158,6 +170,25 @@ class ChessGame:
         # sort in ascending order by error impact of candidate moves
         scored_moves.sort(key = lambda x: x["loss"])
         return scored_moves
+
+    def rate_move(self, move_uci):
+        # Assume that move has just been pushed
+        new_position_score = self.eval_position()
+        if self.board.turn == chess.WHITE:
+            move_cp_loss = self.recent_position_score - new_position_score
+        else:
+            move_cp_loss = new_position_score - self.recent_position_score
+        self.recent_position_score = new_position_score
+        return max(0, move_cp_loss) # negative would mean the move beat the best line -> clamp to zero 
+
+
+    def identify_moved_piece(self, move_uci: str):
+        move = chess.Move.from_uci(move_uci)
+        square = move.from_square
+        piece = self.board.piece_at(square)
+        assert piece is not None # otherwise move cannot have been legal
+        piece_name = chess.piece_name(piece.piece_type).capitalize()
+        return piece_name
 
     def apply_move(self, move_uci):
         move = chess.Move.from_uci(move_uci)

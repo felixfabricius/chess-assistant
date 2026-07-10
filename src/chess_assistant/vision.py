@@ -110,7 +110,7 @@ def infer_fen_from_image(image_path: Path, model: str = "claude-opus-4-8", promp
     return message.content[0].text
 
 class BoardEstimator:
-    def __init__(self, model_type: str = "CNN", config: DictConfig | None = None, calibration_metadata_path: Path | None = None, model = None, device = None):
+    def __init__(self, model_type: str = "CNN", config: DictConfig | None = None, calibration_metadata_path: Path | None = None, model_path = None, device = None):
         """
         Keep track of:
         - recent board estimate
@@ -135,7 +135,9 @@ class BoardEstimator:
             self.client = anthropic.Anthropic()
         else:
             assert calibration_metadata_path is not None
-            assert model is not None
+            assert model_path is not None or model is not None
+            if model is None:
+                model = torch.load(model_path, ) 
             assert device in ["cpu", "cuda", None, torch.device("cpu"), torch.device("cuda")]
             self.device = torch.device(device) if device is not None else torch.device("cpu")
             with open(calibration_metadata_path, "r") as f:
