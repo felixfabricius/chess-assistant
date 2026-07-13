@@ -26,6 +26,7 @@ model.pt
 # Playground
 experiment.ipynb
 explore
+experiment_robot.ipynb
 
 # Artifacts
 artifacts

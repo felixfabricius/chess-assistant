@@ -98,6 +98,18 @@ class ChessGame:
 
         scored_moves = []
         for move in self.board.legal_moves:
+            move_info = {
+                moved_piece: ,
+                turn: ,
+                capture: ,
+                captured_piece: ,
+                castle: ,
+                en_passant: ,
+                check: ,
+                checkmate: ,
+            }
+
+            # Score the move
             loss_increment = 0
 
             before = self.board.copy()

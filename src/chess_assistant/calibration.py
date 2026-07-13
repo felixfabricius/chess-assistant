@@ -54,13 +54,75 @@ def position_robot(mini, height, pitch):
     mini.goto_target(pose, duration=MOVE_DURATION)
 
 
+# Settle tolerances for confirming the head has physically reached the capture pose.
+SETTLE_POS_TOL_M = 0.001       # 1 mm
+SETTLE_ROT_TOL_RAD = 0.0052    # ~0.3 deg
+SETTLE_TIMEOUT_S = 1.5
+SETTLE_POLL_S = 0.03
+
+
+def make_head_rigid(mini) -> None:
+    """Put the head into a stiff, non-drifting position hold so every capture is taken from
+    the exact same pose. The head is a Stewart platform whose daemon default can be
+    compliant/gravity-compensated (backdrivable — it does not spring back when pushed) and
+    can wobble with audio; both perturb the camera pose and de-register the board from the
+    calibration homography. Each command is guarded because they are daemon-side and may be
+    absent/no-ops on some backends.
+
+    Ordering note: ``enable_motors()`` pins targets to the *present* pose before enabling
+    torque, so it must run here (before the ``set_target`` that drives to the capture pose),
+    never after it."""
+    # (method_name, args). Looked up by name inside the guard so a backend that lacks the
+    # command (AttributeError) is tolerated just like one that raises when it runs.
+    commands = (
+        ("disable_wobbling", ()),               # stop audio-reactive head motion
+        ("disable_gravity_compensation", ()),   # leave compliant/backdrivable mode
+        ("set_automatic_body_yaw", (False,)),   # pin the body-yaw DOF
+        ("enable_motors", ()),                  # rigid torque hold
+    )
+    for name, cmd_args in commands:
+        try:
+            getattr(mini, name)(*cmd_args)
+        except Exception as exc:  # noqa: BLE001 - best-effort; backend may lack the command
+            print(f"make_head_rigid: {name} skipped ({exc})")
+
+
+def _head_pose_error(current, target) -> tuple[float, float]:
+    """Return (translation error in metres, rotation error in radians) between two 4x4 poses."""
+    current = np.asarray(current, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    pos_err = float(np.linalg.norm(current[:3, 3] - target[:3, 3]))
+    r_err = current[:3, :3].T @ target[:3, :3]
+    cos_angle = (np.trace(r_err) - 1.0) / 2.0
+    rot_err = float(np.arccos(np.clip(cos_angle, -1.0, 1.0)))
+    return pos_err, rot_err
+
+
 def move_to_capture_pose(mini, height_mm, pitch_deg):
-    """Immediately snap the head to the stored calibration pose (``set_target``, not the
-    smooth ``goto_target``) so every gameplay image is captured from the exact position the
-    board was calibrated at. A short settle sleep lets the head physically arrive first."""
+    """Snap the head to the stored calibration pose and wait until it has physically arrived.
+
+    Uses ``set_target`` (immediate) with a pinned ``body_yaw`` so the camera pose is fully
+    determined, then polls ``get_current_head_pose()`` until the head is within tolerance of
+    the target (or a timeout elapses) instead of blindly sleeping a fixed duration."""
     pose = make_safe_pose(height_mm, pitch_deg)[0]
-    mini.set_target(head=pose, body_yaw=None)
-    time.sleep(MOVE_DURATION)
+    mini.set_target(head=pose, body_yaw=0.0)
+
+    deadline = time.monotonic() + SETTLE_TIMEOUT_S
+    while time.monotonic() < deadline:
+        time.sleep(SETTLE_POLL_S)
+        try:
+            current = mini.get_current_head_pose()
+        except Exception as exc:  # noqa: BLE001 - fall back to a plain settle sleep
+            print(f"move_to_capture_pose: get_current_head_pose unavailable ({exc}); using sleep")
+            time.sleep(MOVE_DURATION)
+            return
+        pos_err, rot_err = _head_pose_error(current, pose)
+        if pos_err <= SETTLE_POS_TOL_M and rot_err <= SETTLE_ROT_TOL_RAD:
+            return
+    print(
+        f"move_to_capture_pose: head not settled within {SETTLE_TIMEOUT_S}s "
+        f"(pos_err={pos_err*1000:.1f}mm, rot_err={np.rad2deg(rot_err):.2f}deg)"
+    )
 
 
 def click_labeled_points_with_review(
@@ -167,11 +229,15 @@ def calibrate(
     height_mm = OPT_HEIGHT_MM
     pitch_deg = OPT_PITCH_MM
 
+    # Stiffen the head so the frame the corners are clicked on is captured from the same rigid,
+    # non-drifting pose gameplay will later reproduce (see move_to_capture_pose / make_head_rigid).
+    make_head_rigid(mini)
+
     # Move to the initial pose right away so the live view — and any capture taken before the
     # user nudges the head — matches the pose we store. Without this the robot sits at its rest
     # pose while the metadata would claim the (untouched) OPT_* values.
     pose, height_mm, pitch_deg = make_safe_pose(height_mm, pitch_deg)
-    mini.set_target(head=pose, body_yaw=None)
+    mini.set_target(head=pose, body_yaw=0.0)
     last_sent_height = height_mm
     last_sent_pitch = pitch_deg
 
@@ -265,7 +331,7 @@ def calibrate(
         if safe_height != last_sent_height or safe_pitch != last_sent_pitch:
             print(f"Moving to height={safe_height}, pitch={safe_pitch}")
             try:
-                mini.set_target(head=pose, body_yaw=None)
+                mini.set_target(head=pose, body_yaw=0.0)
                 height_mm = safe_height
                 pitch_deg = safe_pitch
                 last_sent_height = safe_height
