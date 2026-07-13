@@ -2,7 +2,13 @@ import json
 import numpy as np
 import sys
 import time
-import msvcrt
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import termios
+    import tty
+    import select
 
 from pathlib import Path
 from reachy_mini import ReachyMini
@@ -47,17 +53,11 @@ class InputDetector:
             max_time: float = 1 # max time in hours to wait for 'necessary' events; note int is subtype of float
         ):
         assert input_type in ["keyboard", "robot"]
-        self.input_type == input_type
+        self.input_type = input_type
         self.max_time = max_time
         if input_type == "keyboard":
             self.target_key = target_key
             self.platform = sys.platform
-            if self.platform == "win32":
-                import msvcrt
-            else:
-                import termios
-                import tty
-                import select
 
         else:
             assert isinstance(mini, ReachyMini)
@@ -90,7 +90,7 @@ class InputDetector:
             self.baseline_rotation = baseline_rotation
             mini.goto_target(antennas=np.deg2rad([-self.baseline_rotation, self.baseline_rotation]), duration=0.5)
 
-    def detect_input(self, type: str, time: float = 3, antenna_direction: str = "down") -> bool:
+    def detect_input(self, type: str, alloted_time: float = 3, antenna_direction: str = "downwards") -> bool:
         # Type: necessary or optional
         # For necessary input: wait for input until it is received. Only then return from function.
         # For optional input: 
@@ -99,7 +99,7 @@ class InputDetector:
 
         # Look for one of two input patterns:
         # Move antenna down to make move; move antenna up to reject move
-        assert type in ["necessary", "optional" "move_made", "move_estimate_rejected"]
+        assert type in ["necessary", "optional", "move_made", "move_estimate_rejected"]
         # "move_made" and "move_estimate_rejected are shortcuts" which map to
             # Nescessary input, antenna_movement = "down"
             # And opional input, antenna_movement = "up" respectively
@@ -112,9 +112,15 @@ class InputDetector:
             antenna_direction = "upwards"
 
         move_made = False
-        alloted_time = self.max_time * 3600 if type == "necessary" else time # max time is in hours
+        alloted_time = self.max_time * 3600 if type == "necessary" else alloted_time # max time is in hours
 
         end_time = time.time() + alloted_time
+
+        # Drop any keystrokes buffered during a previous phase so a stale press can't be
+        # misread as fresh input (e.g. auto-rejecting the first suggested move).
+        if self.input_type == "keyboard" and self.platform == "win32":
+            while msvcrt.kbhit():
+                msvcrt.getwch()
 
         while time.time() < end_time and not move_made:
             if self.input_type == "robot":
@@ -154,10 +160,12 @@ class InputDetector:
                         rlist, _, _ = select.select([sys.stdin], [], [], remaining)
                         if rlist:
                             key = sys.stdin.read(1)
-                            if target_key is None or key == target_key:
+                            if self.target_key is None or key == self.target_key:
                                 move_made = True
                     finally:
                         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+            time.sleep(0.02)  # avoid a tight busy-loop while polling for input
         return move_made
         
 

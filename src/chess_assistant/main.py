@@ -44,7 +44,9 @@ def main(mini) -> None:
     print("Start Game")
     # Build game loop
     game_over = False
+    i = 0
     while not game_over:
+        i += 1
         print("Ready for move")
         move_made = input_detector.detect_input(type="move_made")
         print(f"move made: {move_made}") # this should definitely be true
@@ -69,22 +71,22 @@ def main(mini) -> None:
         move_estimate_accepted = False
         for move in move_estimates:
             speaker.suggest_move(move["move"])
-            move_estimate_rejected = input_detector.detect_input(type="move_estimate_rejected", time=config.get("review_time", 3))
-            move_estimate_accepted = not move_estimate_rejected:
+            speaker.pregenerate_comment(move, i)
+            move_estimate_rejected = input_detector.detect_input(type="move_estimate_rejected", alloted_time=config.get("review_time", 3))
+            move_estimate_accepted = not move_estimate_rejected
             if move_estimate_accepted:
                 break
         
         move = move["move"]
+        move_info = move["move_info"]
         assert move_estimate_accepted # Assert we didn't loop through all moves without accepting any.
         print(f"move estimate accepted: {move}")
-        moved_piece = game.identify_moved_piece(move)
         game.apply_move(move)
-        move_cp_loss = game.rate_move(move)
+        move_cp_loss = game.rate_move(move, move_info)
+        speaker.comment_on_move(move, move_info, move_cp_loss)
 
-        speaker.comment_on_move(move, move_cp_loss, moved_piece)
-
-        game_over = game.board.is_checkmate()
-        if game_over:
+        game_over = game.board.is_game_over() # checkmate, stalemate, or any draw condition
+        if game.board.is_checkmate():
             speaker.exclaim_win(game)
 
         input_detector.switch_turn()
