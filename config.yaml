@@ -46,3 +46,5 @@ speaker:
 # move's comment is pre-generated in the background (stockfish ~0.2s + claude ~1.5s +
 # kokoro ~0.6x the spoken duration). Raise it if comments still lag behind acceptance.
 review_time: 4
+
+monitor_calibration: False
