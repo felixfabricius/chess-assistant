@@ -1,7 +1,22 @@
 """
-This script is able to take a photo, send it to some LLM, and return a board position.
-This should be testable. (And ideally I also store outputs of this, so I can later run
-my own training.)
+Reading a board position off the camera image: one classification per square.
+
+`BoardEstimator` runs over the per-square cutouts produced by image_processing.cutout()
+and fills a `BoardEstimate` (64 `SquareEstimate`s, each holding a score for all 13 labels:
+the 12 pieces plus "empty").
+
+Two backends:
+- "CNN" (production): the trained SquareClassifierMultiHead. One forward pass per square;
+  the three heads are recombined into 13-way log-probabilities.
+- "LLM" (baseline): one Claude call per square, kept as the comparison the CNN was built to
+  beat. It only ever returns a hard one-hot, so its "confidences" are 0/1.
+
+Neither backend picks a move. They emit logit-like scores that game.estimate_move() scores
+every legal move against; a square the model is unsure about therefore costs a candidate move
+some likelihood rather than corrupting the position outright.
+
+`infer_fen_from_image` is the older, cruder baseline still kept for comparison: one LLM call
+for the whole board, returning a FEN board string directly.
 """
 import base64
 import json
@@ -87,7 +102,6 @@ def infer_fen_from_image(image_path: Path, model: str = "claude-opus-4-8", promp
     prompt = PROMPTS[prompt_version]
 
     message = client.messages.create(
-        #model="claude-sonnet-4-6",
         model=model,
         max_tokens=1024,
         messages=[
@@ -113,19 +127,22 @@ def infer_fen_from_image(image_path: Path, model: str = "claude-opus-4-8", promp
 class BoardEstimator:
     def __init__(self, model_type: str = "CNN", config: DictConfig | None = None, calibration_metadata_path: Path | None = None, model_weights_path = None, device = None, model = None):
         """
-        Keep track of:
-        - recent board estimate
-        - 
+        Build the estimator and hold the board estimate it keeps overwriting, one board
+        position per call to estimate_board().
 
-        To use:
-        - iterate over each of the squares
-
-        - look at fields of square in recent board estimate:
-          - image path -> load image; could perhaps also store the array in memory right away? - though this could get quite large.
-            then compare this to image for the current piece (accessible via squares_folder)
-            copy estimates over if they match
-            
-          - 
+        Args:
+            model_type: "CNN" for the trained classifier, "LLM" for the Claude baseline.
+            config: the loaded config.yaml. Only read by the LLM path (model + prompt
+                version); the CNN path takes its weights explicitly.
+            calibration_metadata_path: calibration_metadata.json of the setup the squares
+                come from. CNN only, and required: it carries the one piece of metadata the
+                model is fed alongside the image (which board corner is top-left).
+            model_weights_path: safetensors checkpoint to load into a fresh
+                SquareClassifierMultiHead. CNN only.
+            device: "cpu" or "cuda" (default "cpu"). CNN only.
+            model: an already-constructed model, used instead of model_weights_path. This is
+                how evaluation and the tests hand in a model they have in memory, without a
+                round trip through disk.
         """
         assert model_type in ["CNN", "LLM"]
         self.board_estimate = BoardEstimate()
@@ -151,10 +168,20 @@ class BoardEstimator:
             self.model = model.to(self.device)
         self.model_type = model_type
 
-    def estimate_square(self, image_path: Path) -> SquareEstimate: 
+    def estimate_square(self, image_path: Path) -> SquareEstimate:
+        """
+        Classify one square, given the path of its cutout (.../squares/e4/e4.png).
+
+        The two backends read different files from that directory: the LLM gets the annotated
+        PNG (the crop with red markers on the target square's corners, which the prompt refers
+        to), the CNN gets the 4-channel masked .npy the crop was saved alongside.
+
+        Returns a SquareEstimate whose 13 label fields hold logit-like scores. The LLM's are a
+        hard one-hot; the CNN's are log-probabilities.
+        """
         if self.model_type == "LLM":
             image_path = image_path.parent / (image_path.stem + "_annotated" + image_path.suffix)
-            print(image_path) 
+            print(image_path)
             message = self.client.messages.create(
                 model=self.model_version,
                 max_tokens=128,
@@ -189,8 +216,9 @@ class BoardEstimator:
             return square_estimate
 
         else:
-            square = image_path.stem # TODO: this might be brittle if I change conventions;
-            # and e.g. image_path is no longer .../{square}.png
+            # TODO: the square name is recovered from the filename, so this breaks if the
+            # cutout naming convention in image_processing.py ever changes.
+            square = image_path.stem
             square_dir = image_path.parent
             setup_dir = square_dir.parent.parent.parent
 
@@ -201,7 +229,8 @@ class BoardEstimator:
             metadata = metadata.to(self.device)
             assert metadata.shape == (1, 4)
 
-            # For the image
+            # The image: RGB plus the square's mask as a 4th channel, transformed exactly as in
+            # training (EVAL_TRANSFORM, i.e. no augmentation).
             image = np.load(square_dir / f"{square}_masked.npy")
             rgb = image[..., :3]
             mask = tv_tensors.Mask(image[..., 3])
@@ -210,9 +239,9 @@ class BoardEstimator:
             image = torch.cat([rgb, mask]).unsqueeze(dim=0).to(self.device)
             assert image.shape == (1, 4, 144, 144)
             
-            # Now turn the model output into the square prediction;
-            # in both cases we store logit-like values (raw logits or reconstructed
-            # log-probabilities), which game.py feeds into its own CrossEntropyLoss.
+            # Whatever the model's output shape, what gets stored is logit-like values (raw
+            # logits or reconstructed log-probabilities), which game.py feeds into its own
+            # CrossEntropyLoss.
             square_estimate = SquareEstimate(
                 image_path=image_path,
                 copied=False,
@@ -234,33 +263,26 @@ class BoardEstimator:
 
     def estimate_board(self, squares_dir):
         """
-        Declar new BoardEstimate object.
-        For each square:
-            - check if image has changed relative to the last image (see recent_board.square.image_path) to compare
-            - if no:
-                - then create a copy.deepcopy of estimates for that square & modify the copied_from 
-                  (Maybe we don't even need a copy.deepcopy because it's okay if we overwrite?)
-                  I think that's quite plausiblel actually
-            - if yes:
-                - classify the individual square. That shold be a separate method.
+        Classify all 64 squares of one board image and return the resulting BoardEstimate.
+
+        `squares_dir` is the directory image_processing.cutout() wrote, i.e. one subdirectory
+        per square. The estimate is stored on the estimator (self.board_estimate) as well as
+        returned; it is overwritten on every call, so callers must not hold on to it across
+        board positions.
         """
         for square in SQUARES:
             image_path = squares_dir / square / f"{square}.png"
             if (
                 getattr(self.board_estimate, square) # these are initialised as None
-                and 1 == 2 # TODO # check similarity between images:
-            ):            
-                # Copy over
-                # Set the copied_from attribute
-                # Note that this also overwrites self.recent_board. 
-                # So maybe no need to pretend we have two separate objects here?
-                # Just use self.board for everything?
-                """
-                TODO: fix this section. Not sure this is correct. (Also perhaps think about valid 
-                condition in the if-statement.)
-                When fixing, carefully note that getattr and setattr apparently do not support
-                nested attribute access.
-                """
+                # TODO: never taken. The plan was to skip re-classifying a square whose crop is
+                # unchanged since the last board image (most of the board is static between
+                # moves) and copy the previous estimate over, recording where it was copied from.
+                # It needs an image-similarity check to gate on, and the branch below is not
+                # correct yet: getattr/setattr do NOT do nested attribute access, so the
+                # f"{square}.copied" strings below set string-keyed junk attributes rather than
+                # fields of the SquareEstimate. Left in place as the sketch of the fix.
+                and 1 == 2
+            ):
                 square_estimate = getattr(self.recent_board, square)
                 setattr(
                     self.board_estimate, f"{square}.copied_from",
@@ -273,12 +295,68 @@ class BoardEstimator:
                 setattr(self.board_estimate, f"{square}.image_path", image_path)
                 setattr(self.board_estimate, f"{square}.copied", True)
             else:
-                # TODO: perhaps also pass additional info?
-                # Like pixel position of square, and some metadata about the robot position?
-                # (I think this is particularly relevant for our own model, which might be able to learn )
-                # valuable things from this.
                 square_estimate = self.estimate_square(image_path)
                 setattr(self.board_estimate, square, square_estimate)
 
         return self.board_estimate
+
+
+if __name__ == "__main__":
+    # Debug tool: run the trained classifier over a squares directory and print what it thinks
+    # is standing on each square. Useful when the board estimate disagrees with reality and you
+    # want to see whether the model is confidently wrong or merely unsure.
+    #
+    #   uv run python -m chess_assistant.vision \
+    #       data/generated/2026-07-01_175334/board_2026-07-01_175602/squares --squares a1 e4
+    import argparse
+    import math
+
+    parser = argparse.ArgumentParser(description="Print the model's prediction for each square.")
+    parser.add_argument(
+        "squares_dir",
+        type=Path,
+        help="A .../<board>/squares directory, as written by image_processing.cutout().",
+    )
+    parser.add_argument(
+        "--squares",
+        nargs="+",
+        default=SQUARES,
+        metavar="SQUARE",
+        help="Squares to classify, e.g. --squares a1 e4. Defaults to all 64.",
+    )
+    parser.add_argument("--config", type=Path, default=Path("config.yaml"))
+    parser.add_argument(
+        "--calibration-metadata",
+        type=Path,
+        default=None,
+        help="Defaults to calibration_metadata.json in the setup dir two levels up from squares_dir.",
+    )
+    parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
+    parser.add_argument("--top-k", type=int, default=3, help="How many labels to print per square.")
+    args = parser.parse_args()
+
+    config = OmegaConf.load(args.config)
+    calibration_metadata_path = (
+        args.calibration_metadata
+        if args.calibration_metadata is not None
+        else args.squares_dir.parent.parent / "calibration_metadata.json"
+    )
+
+    board_estimator = BoardEstimator(
+        "CNN",
+        config,
+        calibration_metadata_path=calibration_metadata_path,
+        model_weights_path=Path(config.vision.model_weights_path),
+        device=args.device,
+    )
+
+    for square in args.squares:
+        square_estimate = board_estimator.estimate_square(args.squares_dir / square / f"{square}.png")
+        # The stored scores are log-probabilities; exp() turns them back into probabilities.
+        ranked = sorted(
+            ((getattr(square_estimate, label), label) for label in TARGET_MAP),
+            reverse=True,
+        )[: args.top_k]
+        predictions = "  ".join(f"{label}: {math.exp(logprob):.3f}" for logprob, label in ranked)
+        print(f"{square}  {predictions}")
 

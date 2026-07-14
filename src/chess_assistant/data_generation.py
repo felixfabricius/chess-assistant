@@ -1,6 +1,9 @@
 """Data-generation tool for the chess vision classifier.
 
-Workflow (see README / module docstring at bottom for the full write-up):
+Run with ``uv run python -m chess_assistant.data_generation [--center]``. Needs the robot and a
+display; calibration starts automatically on launch.
+
+Workflow:
 
 1. A ``pygame`` window shows a virtual chessboard (White at the bottom).
 2. You make a move / edit the position on the virtual board.
@@ -11,6 +14,51 @@ Workflow (see README / module docstring at bottom for the full write-up):
 6. The virtual board is the source of truth for the label of every square.
 7. Labels are written into each square's metadata JSON, a per-image
    ``metadata.json`` is saved, and 64 rows are appended to the master CSV.
+
+Keybindings:
+
+===========================  ===================================================================
+Key                          Action
+===========================  ===================================================================
+Space                        Capture: photo -> warp -> cutout -> labels -> 64 CSV rows
+click, then click            Select the source square, then the target (moves the piece)
+right-click                  Cancel the current selection / armed spawn piece
+f                            Toggle legal-move <-> free-placement mode
+Esc                          Quit (cancels a pending promotion instead, if one is pending)
+legal mode: n / r / q        New game / recalibrate (new setup) / quit
+free mode: PNBRQK / pnbrqk   Arm a white / black piece to spawn, then click a square
+free mode: x                 Remove the piece under the cursor
+promotion: q / r / b / n     Choose the promotion piece (it never silently defaults to a queen)
+===========================  ===================================================================
+
+In free-placement mode the letters spawn pieces, so ``n`` / ``r`` / ``q`` are *not* commands
+there (they would collide with the black knight / rook / queen). Press ``f`` to return to legal
+mode first, or quit with Esc.
+
+Data layout::
+
+    data/generated/
+      data.csv                          # master CSV, appended across every session
+      <setup_id>/                       # timestamp; one per calibration
+        calibration_metadata.json       # written by calibrate()
+        setup_metadata.json
+        board_<timestamp>/              # == image_id; the dir capture_image() creates
+          image.png                     # the raw frame
+          image_warped.png              # Processor.warp() output
+          metadata.json                 # per-image record, includes the full piece_map
+          squares/<square>/
+            <square>_annotated.png      # the cutout the CSV points at
+            <square>_masked.npy         # the model input
+            <square>_metadata.json      # Processor's metadata, plus the "label" we add
+
+CSV schema: one row per square, so 64 rows per captured image. The columns are ``CSV_COLUMNS``
+(``setup_id``, ``setup_split``, ``image_id``, ``square``, ``label``, ``square_image_path``,
+``full_image_path``, ``calibration_metadata_path``, ``valid_game_position``, ``board_fen``,
+``previous_board_fen``, ``move_uci``, ``created_at``).
+
+Labels are 13-class: ``"empty"``, or a python-chess piece symbol (``P N B R Q K`` for White,
+``p n b r q k`` for Black). ``valid_game_position`` is True only while the position has stayed in
+legal-move mode since the last new game; any free-placement edit flips it to False.
 
 The pure helper functions and :class:`DataGenerationSession` contain no
 ``pygame`` / robot code so they can be unit tested without a display.
@@ -183,14 +231,18 @@ def append_rows_to_csv(
         writer.writerows(rows)
 
 
-def create_setup(data_root: Path, timestamp: str | None = None) -> tuple[str, Path]:
+def create_setup(data_root: Path, timestamp: str | None = None) -> tuple[str, Path, str]:
     """Create (and return) a new timestamped setup directory.
 
-    Returns ``(setup_id, setup_dir)``. ``timestamp`` can be injected for tests.
+    Returns ``(setup_id, setup_dir, setup_split)``. ``timestamp`` can be injected for tests.
     """
     setup_id = timestamp or now_stamp()
     setup_dir = Path(data_root) / setup_id
     setup_dir.mkdir(parents=True, exist_ok=True)
+    # The train/val/test split is drawn once PER SETUP, not per image: every frame of a setup
+    # shares one lighting, one board and one camera pose, so splitting per image would put
+    # near-identical frames on both sides of the split and let the model memorise a setup
+    # instead of learning the pieces. Whole setups are therefore held out together.
     setup_split = random.choices(["train", "val", "test"], [0.6, 0.2, 0.2])[0]
     return setup_id, setup_dir, setup_split
 
@@ -305,10 +357,11 @@ class DataGenerationSession:
         """Attempt a legal move from ``from_square`` to ``to_square``.
 
         Returns one of:
-        - ``"ok"``            move applied; FEN tracking updated.
-        - ``"illegal"``       no such legal move.
-        - ``"need_promotion"``the move is a pawn promotion; call again with
-                              ``promotion`` set to a piece type.
+
+        - ``"ok"`` -- move applied; FEN tracking updated.
+        - ``"illegal"`` -- no such legal move.
+        - ``"need_promotion"`` -- the move is a pawn promotion; call again with ``promotion``
+          set to a piece type.
         """
         from_idx = chess.parse_square(from_square)
         to_idx = chess.parse_square(to_square)
@@ -519,8 +572,9 @@ class BoardUI:
     # -- piece assets --------------------------------------------------------
 
     def _load_piece_images(self) -> dict:
-        """Rasterise the 12 piece SVGs (Cburnett set, bundled with python-chess)
-        to pygame surfaces sized to fit a square, once, at startup.
+        """Rasterise the 12 piece SVGs to pygame surfaces, once, at startup.
+
+        Uses the Cburnett set bundled with python-chess, sized to fit a square.
         """
         import io
         import chess.svg
@@ -802,6 +856,12 @@ def generate_data(
 
 
 if __name__ == "__main__":
+    # Usage: uv run python -m chess_assistant.data_generation [--center]
+    #
+    # Opens the virtual board against the default config (config.yaml) and data root
+    # (data/generated), and calibrates a first setup straight away. Pass --center to click the
+    # extended centre point during every calibration instead of interpolating it from the four
+    # corners. Requires the robot and a display.
     import sys
 
     generate_data(annotate_center="--center" in sys.argv[1:])

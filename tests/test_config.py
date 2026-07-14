@@ -1,3 +1,7 @@
+"""Tests for the shared label encoding: decompose_label splitting a 13-way label into the three
+head targets, and reconstruct_13way_logprobs putting the heads back together again.
+"""
+
 import torch
 from torch import nn
 
@@ -30,13 +34,14 @@ def test_reconstruct_sums_to_one():
     logits_type = torch.randn(5, 6)
     logprobs = reconstruct_13way_logprobs(logit_empty, logits_color, logits_type)
     assert logprobs.shape == (5, 13)
-    # (a) softmax over the last dim sums to 1
+    # Softmax over the last dim sums to 1, as it would for any logits...
     assert torch.allclose(torch.softmax(logprobs, dim=-1).sum(dim=-1), torch.ones(5), atol=1e-5)
-    # since these are already normalised log-probabilities, exp() also sums to 1
+    # ...but these are already normalised log-probabilities, so exp() sums to 1 as well. That is
+    # the property the conditional-independence recombination has to preserve.
     assert torch.allclose(logprobs.exp().sum(dim=-1), torch.ones(5), atol=1e-5)
 
 def test_reconstruct_argmax_unambiguous():
-    # (b) a very confident "non-empty, black, knight" should argmax to TARGET_MAP["n"].
+    # A very confident "non-empty, black, knight" should argmax to TARGET_MAP["n"].
     # sigmoid(logit_empty) == P(piece), so a confident piece has a large POSITIVE logit_empty.
     logit_empty = torch.tensor([10.0])                                      # P(piece) ~ 1
     logits_color = torch.tensor([[-10.0, 10.0]])                            # black
@@ -56,8 +61,8 @@ def test_reconstruct_occupancy_direction():
     assert empty.argmax(dim=-1).item() == TARGET_MAP["empty"]
 
 def test_reconstruct_matches_cross_entropy():
-    # (c) feeding the output through CrossEntropyLoss reproduces -log(p_target) computed
-    # directly from the reconstructed probabilities.
+    # The log-probs must be a drop-in for logits: CrossEntropyLoss over them reproduces
+    # -log(p_target) computed directly from the reconstructed probabilities.
     torch.manual_seed(1)
     logit_empty = torch.randn(4)
     logits_color = torch.randn(4, 2)

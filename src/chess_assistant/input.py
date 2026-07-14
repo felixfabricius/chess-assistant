@@ -1,3 +1,17 @@
+"""How the players talk back to the robot: either the antennas or the keyboard.
+
+:class:`InputDetector` exposes one primitive -- "was there an input?" -- in two flavours:
+*necessary* input, which blocks until it arrives, and *optional* input, which gives up after a
+short window. That is enough for the whole game loop: waiting for a player to finish their move
+is necessary input, and catching a rejection of a suggested move is optional input.
+
+With ``input_type="robot"`` the two antennas are the buttons: the player to move pushes their
+antenna down to confirm, or up to reject the robot's suggestion. With ``input_type="keyboard"``
+any key (or one specific key) stands in for that, which is beneficial for camera angle stability.
+(Pushing antennas tends to result in the robot head returning to a marginally different position,
+which disturbs image processing.)
+"""
+
 import json
 import numpy as np
 import sys
@@ -14,24 +28,6 @@ from pathlib import Path
 from reachy_mini import ReachyMini
 
 
-"""
-To implement here:
-- for each of the two antennas, need to specify degree amount that makes them stand out horizontally. 
-  (Note that head can be tilted which can make this awkward in principle.)
-- also for each of the antennas, need ways to detect: "antenna is used as a button"
-  i.e. some radian amount that if we exceed or fall below, we know: this antenna has been pressed up / down
-- finally, need to wire this into main by constantly monitoring for events. Perhaps this can be done using 
-  a while loop and perhaps time.sleep()
-"""
-
-# One input manager class
-# Should support a few things:
-    # Input via antennas (up / down separately)
-    # Or input via keys (any key, a specific key)
-# And also:
-    # "See if there was any input in a given period of time"
-    # Or: wait until there was input
-
 SIDE_MAP = {
     "right": 0,
     "left": 1
@@ -39,10 +35,14 @@ SIDE_MAP = {
 
 INVERSE_SIDE_MAP = {0: "right", 1: "left"}
 
+# How far an antenna has to travel off its baseline before we call it a deliberate press. Small
+# enough to be an easy flick, large enough not to trigger on the slop in a resting antenna.
 THRESHOLD_DEGREES = 3
 
-# This needs to detect events, so kind of needs to run continually
+
 class InputDetector:
+    """Polls whichever input source is configured until it sees a press (or times out)."""
+
     def __init__(
             self, 
             input_type: str = "keyboard", 
@@ -50,7 +50,7 @@ class InputDetector:
             mini: ReachyMini | None = None,
             calibration_metadata_path: Path | None = None,
             baseline_rotation: int | None = 85,
-            max_time: float = 1 # max time in hours to wait for 'necessary' events; note int is subtype of float
+            max_time: float = 1 # max time in HOURS to wait for a 'necessary' event
         ):
         assert input_type in ["keyboard", "robot"]
         self.input_type = input_type
@@ -66,14 +66,14 @@ class InputDetector:
 
             self.mini = mini
 
-            # Assume that robot sits NEXT to the board centrally, allowing
+            # Assume that the robot sits NEXT to the board centrally, allowing
             # both players to easily operate the antennas as buttons.
-            # Then the top-left square from the robots perspective should be either
-            # h8, in which case white is on its right side and black on its left side
+            # Then the top-left square from the robot's perspective should be either
+            # h8, in which case white is on its right side and black on its left side,
             # or a1, in which case the converse is true.
             # The robot can also be set up at other positions, but in that case
-            # the "press antenna to submit move" interface is awkward and should 
-            # be modified. 
+            # the "press antenna to submit move" interface is awkward and should
+            # be modified.
             with open(calibration_metadata_path, "r") as f:
                 calibration_metadata = json.load(f)
                 tl = calibration_metadata["camera_natural_orientation"]["order"]["tl"]
@@ -85,25 +85,31 @@ class InputDetector:
 
             # From the robot's perspective, the first argument here controls the right antenna
             # and the second one controls the left antenna.
-            # And 0 degrees means antenna points straight upwards. Slightly >0 means anticlockwise
-            # rotation. 
+            # And 0 degrees means the antenna points straight upwards. Slightly >0 means
+            # anticlockwise rotation.
+            # The baseline (85 degrees) therefore splays both antennas out roughly horizontally,
+            # which leaves them room to travel in either direction from a visible resting pose.
             self.baseline_rotation = baseline_rotation
             mini.goto_target(antennas=np.deg2rad([-self.baseline_rotation, self.baseline_rotation]), duration=0.5)
 
     def detect_input(self, type: str, alloted_time: float = 3, antenna_direction: str = "downwards") -> bool:
-        # Type: necessary or optional
-        # For necessary input: wait for input until it is received. Only then return from function.
-        # For optional input: 
-        # Only wait for a specific amount of time and return whether that input was received or not
-        # from function once time has run out.
+        """Wait for an input and report whether one arrived.
 
-        # Look for one of two input patterns:
-        # Move antenna down to make move; move antenna up to reject move
+        ``type`` is one of:
+
+        - ``"necessary"`` -- block until the input arrives (giving up only after ``max_time``
+          hours). Used when the game cannot proceed without the players, e.g. waiting for them
+          to finish their move on the physical board.
+        - ``"optional"`` -- wait ``alloted_time`` seconds and report whether the input arrived.
+          Used for the review window, where silence means "no objection".
+        - ``"move_made"`` / ``"move_estimate_rejected"`` -- shortcuts for the two combinations
+          the game loop actually uses: necessary + antenna down, and optional + antenna up.
+
+        The two antenna gestures are deliberately opposite: push the antenna DOWN to confirm a
+        move, and UP to reject the robot's suggestion.
+        """
         assert type in ["necessary", "optional", "move_made", "move_estimate_rejected"]
-        # "move_made" and "move_estimate_rejected are shortcuts" which map to
-            # Nescessary input, antenna_movement = "down"
-            # And opional input, antenna_movement = "up" respectively
-        
+
         if type == "move_made":
             type = "necessary"
             antenna_direction = "downwards"
@@ -131,15 +137,17 @@ class InputDetector:
                 antenna_position = np.rad2deg(antenna_position)
 
                 if antenna_direction == "downwards":
-                    # If side to play is left, then antenna being pushed down corresponds to 
-                    # small anti-clockwise rotation, which is encoded as degrees slightly increasing.
+                    # The two antennas rest at opposite baselines (+85 and -85), so "down" is a
+                    # different sign for each. For the left antenna it is a small anti-clockwise
+                    # rotation, i.e. degrees increasing past +baseline; for the right one it is
+                    # the mirror image, i.e. degrees dropping below -baseline. Hence the two
+                    # comparisons look different but mean the same gesture.
                     if self.side_to_play == "left":
                         move_made = antenna_position - self.baseline_rotation > THRESHOLD_DEGREES
                     else:
                         move_made = -self.baseline_rotation - antenna_position > THRESHOLD_DEGREES
-                        # if side_to_play is right, then move_made requires that
-                        # antenna_position is more negative than -self.baseline_rotation
                 else:
+                    # Same idea for "up", with both comparisons flipped.
                     if self.side_to_play == "left":
                         move_made = self.baseline_rotation - antenna_position > THRESHOLD_DEGREES
                     else:
@@ -170,10 +178,15 @@ class InputDetector:
         
 
     def reset_positions(self):
+        """Splay both antennas back out to the baseline, ready for the next press."""
         if self.input_type == "robot":
             self.mini.goto_target(antennas=np.deg2rad([-self.baseline_rotation, self.baseline_rotation]), duration=0.5)
 
     def switch_turn(self):
+        """Hand the buttons to the other player, so we watch their antenna next.
+
+        A no-op in keyboard mode, where both players share the same keyboard.
+        """
         if self.input_type == "robot":
             self.side_to_play = INVERSE_SIDE_MAP[1 - SIDE_MAP[self.side_to_play]]
 

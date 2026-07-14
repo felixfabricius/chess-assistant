@@ -1,5 +1,5 @@
 """
-Script which is able to connect to Reachys's camera and take photos.
+Taking photos of the board with Reachy's camera.
 """
 from pathlib import Path
 from datetime import datetime
@@ -9,7 +9,11 @@ from reachy_mini import ReachyMini
 
 def capture_image(mini, output_dir: Path) -> Path:
     """
-    Capture on frame from Reachy's camera and save it as a PNG.
+    Capture one frame from Reachy's camera and save it as a PNG.
+
+    Each frame gets its own timestamped directory under `output_dir` (the setup dir), because
+    everything derived from it -- the warped board, the 64 square cutouts -- is written next to
+    it. Returns that directory, not the image path.
     """
     assert isinstance(output_dir, Path)
     assert output_dir.is_dir()

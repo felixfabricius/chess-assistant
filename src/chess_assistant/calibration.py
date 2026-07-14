@@ -1,3 +1,23 @@
+"""Interactive calibration: pin the head, click the board, write ``calibration_metadata.json``.
+
+A calibration ties one physical setup (where the board is, where the robot's head was) to the
+geometry the rest of the pipeline needs. The v2 metadata records, all measured on the
+*undistorted* frame: the four board corners; the four "extended" corners — the top of a piece
+standing on each corner square, which is what tells us how far a piece overhangs its square —
+plus an extended centre; the head pose the frame was captured at; and the camera intrinsics,
+cached so the offline batch never has to import ``reachy_mini``.
+
+The pose matters as much as the clicks: the homography is only valid while the camera is where
+it was when the corners were clicked. So the head is made rigid before the capture frame is
+frozen (``make_head_rigid``) and driven back to the same pose before every gameplay frame
+(``move_to_capture_pose``); ``calibration_monitor`` is the live check that it has not drifted.
+This has revealed that the ``input.source: keyboard`` (see ``config.yaml``) is preferable to 
+``input.source: robot`` for sake of image stability.
+
+Entry points (see ``__main__``): ``calibrate`` needs the live robot; ``annotate_existing`` and
+``relabel_existing_setups`` re-click a stored ``raw.png`` and do not.
+"""
+
 import json
 import threading
 import time
@@ -14,15 +34,20 @@ from chess_assistant.config import SQUARES
 # reachy_mini (the `robot` dependency group) is imported lazily inside the functions that need
 # the live robot, so the pure calibration helpers below stay importable without it.
 
+# Safety limits on the head pose. Every requested pose goes through make_safe_pose, which clamps
+# into this box, so the interactive keyboard controls below can never command the head outside
+# the range that keeps the board in view and the Stewart platform within its usable travel.
 MIN_HEIGHT_MM = -40
 MAX_HEIGHT_MM = 21
 
 MIN_PITCH_DEG = -28
 MAX_PITCH_DEG = 28
 
+# How far one keypress moves the head in the interactive loop (w/s: height, i/k: pitch).
 HEIGHT_STEP_MM = 2
 PITCH_STEP_DEG = 2
 
+# Where the head starts: the pose the board tends to frame up well from.
 OPT_HEIGHT_MM = 8
 OPT_PITCH_MM = 26
 
@@ -34,6 +59,11 @@ def clamp(value: float, lower: float, upper: float) -> float:
 
 
 def make_safe_pose(height_mm: float, pitch_deg: float):
+    """Build a head pose from a height/pitch request, clamped into the safe range above.
+
+    Returns ``(pose, clamped_height_mm, clamped_pitch_deg)``. Callers compare the clamped values
+    against what they asked for to notice that a request was trimmed.
+    """
     from reachy_mini.utils import create_head_pose
 
     height_mm = clamp(height_mm, MIN_HEIGHT_MM, MAX_HEIGHT_MM)
@@ -50,6 +80,7 @@ def make_safe_pose(height_mm: float, pitch_deg: float):
 
 
 def position_robot(mini, height, pitch):
+    """Move the head to a (clamped) capture pose with a smooth, fixed-duration motion."""
     pose = make_safe_pose(height, pitch)[0]
     mini.goto_target(pose, duration=MOVE_DURATION)
 
@@ -209,7 +240,11 @@ def click_labeled_points_with_review(
 
 
 def _log_calibration_summary(calibration_data: dict, config_path) -> None:
-    """Build a Processor from the calibration and log the vanishing-point residual (§8)."""
+    """Build a Processor from the fresh calibration and print the vanishing-point residual.
+
+    Purely a fit-quality read-out — the square geometry does not use the vanishing point (see
+    ``Processor.__init__``). A large residual usually means an extended point was mis-clicked.
+    """
     try:
         from chess_assistant.image_processing import Processor
 
@@ -225,7 +260,17 @@ def calibrate(
     config_path="config.yaml",
     annotate_center: bool = False,
 ) -> dict | None:
+    """Frame the board with the live head, then collect a v2 calibration from a frozen frame.
 
+    Shows the camera feed with keyboard control of the pose: ``w``/``s`` raise/lower the head,
+    ``i``/``k`` pitch it up/down, SPACE freezes the current frame and hands it to ``CalibrationUI``
+    for clicking, ``q`` aborts. The pose held at the moment of SPACE is the capture pose gameplay
+    will replay, and is stored alongside the clicks.
+
+    Writes ``<setup_dir>/calibration_metadata.json`` (plus ``raw.png`` and ``raw_undistorted.png``)
+    and returns the calibration dict, or ``None`` if the user aborted. ``annotate_center`` asks for
+    a clicked extended centre rather than interpolating it from the four extended corners.
+    """
     height_mm = OPT_HEIGHT_MM
     pitch_deg = OPT_PITCH_MM
 
@@ -914,17 +959,27 @@ def relabel_existing_setups(
 
 
 if __name__ == "__main__":
+    # Three modes:
+    #   (no args)            fresh calibration on the live robot
+    #   relabel              re-click every stored setup under data/generated
+    #   <path/to/raw.png>    re-click one stored setup
+    # `--center` opts into clicking the extended centre (default: interpolate it from corners).
     import sys
 
     args = sys.argv[1:]
-    # `--center` opts into clicking the extended centre (default: interpolate it from corners).
     annotate_center = "--center" in args
     args = [a for a in args if a != "--center"]
 
     if args:
+        # Both relabelling modes work off a stored raw.png, so they never touch the robot.
         if args[0] == "relabel":
             relabel_existing_setups(annotate_center=annotate_center)
         else:
             annotate_existing(Path(args[0]), annotate_center=annotate_center)
     else:
-        calibrate(annotate_center=annotate_center)
+        # Only a fresh calibration needs the live camera and head, so open the robot here rather
+        # than at import time (reachy_mini is an optional dependency group).
+        from reachy_mini import ReachyMini
+
+        with ReachyMini(media_backend="default") as mini:
+            calibrate(mini, annotate_center=annotate_center)

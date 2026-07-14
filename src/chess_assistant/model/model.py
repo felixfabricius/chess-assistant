@@ -1,33 +1,32 @@
+"""The three square classifiers. Input is one 144x144x4 square crop (RGB + the square's mask)
+plus a small metadata vector; output is a piece label for that square.
+
+Model 1 is the original baseline, model 2 adds normalisation/residuals/dilation, and model 3
+(SquareClassifierMultiHead) is the one actually shipped -- see its docstring for why the head is
+factored into three.
+"""
+
 import torch
 from torch import nn
 
-# We start with 144 x 144 x 4
+
 class SquareClassifier(nn.Module):
+    """Model 1, the baseline: a plain conv stack (no normalisation, no residuals), max-pooled
+    down after every layer, then global max+avg pooling concatenated with the metadata vector and
+    fed to an MLP with a single 13-way head.
+
+    The metadata exists because the same piece looks completely different depending on where the
+    camera sits: which board corner is at the top of the image decides how a piece should be
+    interpreted, and the robot's height changes the apparent shape on top of that. Both are
+    captured well enough by a one-hot of the top-left corner, so that is what gets fed in. The
+    mask channel plays the same role for "where in the crop should I even look".
+
+    Kept for reference; superseded by SquareClassifier2 and SquareClassifierMultiHead. Its size is
+    the reason those exist: ~450k parameters against only ~10k square crops of training data, which
+    is what pushed the project towards data augmentation and smaller models.
+    """
     def __init__(self):
         super().__init__()
-        """
-        Baseline: 
-        - downsample image after each convolutional layer
-        - downsample using max pool rather than convolutional with stride
-        - max pool and average pool at end
-        - add SOME info: 
-            - stuff about likely orientation of pieces.
-              so: what corner is at top; and perhaps somehow infer orientation based on 
-              the pixel coordinates?
-              This affects: how to interpret piece.
-            - But robot height also matters for this & makes pieces look differently.
-            - All of this can technically be captured via the pixel coordinates of corners & square.
-              And OHE version of what corner is at top.
-              So let's use this, and just take care to perhaps not repeat positions across different setups
-              (i.e. across different splits) too often!
-            - Then also: where to look for piece: mask 
-
-        To add: some normalisation? Batch norm / group norm etc?
-
-        Note that current ratio is: around 10k square cropouts in training data; and around 450k
-        parameters in model. That might be ambitious.
-        -> data augmentation now; and perhaps: also try smaller model.
-        """
         # Downsample using max pool
         self.max_pool_1 = nn.MaxPool2d(
             kernel_size=2,
@@ -81,16 +80,15 @@ class SquareClassifier(nn.Module):
 
 
 class SquareClassifier2(nn.Module):
+    """Model 2: convolutional feature extraction, then the features are concatenated with the
+    metadata and passed through fully connected layers to a single 13-way head.
+
+    Over the baseline this adds batch normalisation, a residual block, depthwise dilated
+    convolutions to widen the receptive field, and 2x2 adaptive max/avg pooling that preserves
+    some spatial structure instead of collapsing it entirely.
+    """
     def __init__(self):
         super().__init__()
-        """
-        Convolutional neural network that extracts features from images and then augments
-        with metadata; followed by fully connected layers.
-
-        Includes: batch normalisation, residual connections, depthwise dilated convolutional 
-        layers to widen receptive fields, and average and global pooling that preserves some
-        spatial structure in the end
-        """
         # Downsample using max pool
         self.max_pool_1 = nn.MaxPool2d(
             kernel_size=2,
@@ -164,42 +162,38 @@ class SquareClassifier2(nn.Module):
             ),
             dim=1
         )
-        
-        # Shape of this will be 128 x 4
 
-        # Batch norm is effective with batch size of 64 and shuffle=True in dataloader;
-        # In that case, there will be data from multiple setups present
-        # Potential issue: metadata varies only across the setups though, and there might be 
-        # some (unlikely) cases, where all the metadata comes from only a handful of setups
-        # Is there a way to make batchnorm pay attention to the learned mean and standard deviation
-        # even throughout training?
-        # Background: batch norm assumes iid
-        # But: with my data actually very unlikely that the images come from <10 setups
-        # Won't worry about that now.
-        # And even if they do, that will just make variance 0; so information loss for that feature
-        # mean is also 0 for everything. Not too terrible. (Though if highly imbalanced, might blow up)
-
-        # This is no longer necessary since metadata is now simply OHE of top left corner
-
+        # Batch norm assumes iid batches, and metadata varies only across setups: a batch drawn
+        # from very few setups would see near-zero variance in the metadata features. With
+        # batch_size=64 and shuffle=True that is very unlikely, and the failure mode is mild
+        # anyway (a constant feature just carries no information). Moot in any case now that the
+        # metadata is only a one-hot of the top-left corner.
         mlp_input = torch.cat([image_features, metadata], dim=1)
         logits = self.mlp_2(mlp_input)
         return logits
 
 
 class SquareClassifierMultiHead(nn.Module):
+    """Model 3, the one that ships. Same trunk as SquareClassifier2 (conv feature extraction,
+    residual dilated block, adaptive max/avg pooling, image features concatenated with metadata
+    -> mlp_input), but the single 13-way head is replaced by three:
+      - empty_head: 1 logit (empty vs non-empty)
+      - color_head: 2 logits (white/black | non-empty)
+      - type_head:  6 logits (K/Q/R/B/N/P | non-empty)
+
+    A single 13-way head has to learn each (colour, type) combination from only the crops of that
+    exact piece, and the 13 classes are badly imbalanced: ~56% of squares are empty, and there is
+    exactly one king and one queen per side against eight pawns. Factoring the problem lets every
+    head pool data across the other factor -- the colour head sees every piece regardless of type,
+    the type head sees every king regardless of colour -- so the data-starved king/queen classes
+    get twice as many training data points and the huge empty class is handled by its own
+    binary head instead of dominating a 13-way softmax.
+
+    The heads are recombined into the original 13-way distribution at inference/eval time via
+    reconstruct_13way_logprobs.
+    """
     def __init__(self):
         super().__init__()
-        """
-        Same trunk as SquareClassifier2 (conv feature extraction, residual dilated block,
-        adaptive max/avg pooling, metadata MLP -> mlp_input), but the single 13-way head is
-        replaced by three heads:
-          - empty_head: 1 logit (empty vs non-empty)
-          - color_head: 2 logits (white/black | non-empty)
-          - type_head:  6 logits (K/Q/R/B/N/P | non-empty)
-        The color/type heads pool data across the other factor, which helps the
-        data-starved king/queen classes. The three heads are recombined into the original
-        13-way distribution at inference/eval time via reconstruct_13way_logprobs.
-        """
         # Downsample using max pool
         self.max_pool_1 = nn.MaxPool2d(
             kernel_size=2,
@@ -251,7 +245,7 @@ class SquareClassifierMultiHead(nn.Module):
         self.max_pool = nn.AdaptiveMaxPool2d((2, 2))
         self.avg_pool = nn.AdaptiveAvgPool2d((2, 2))
 
-        ### Three heads over the shared 1040-dim mlp_input (1024 image + 16 metadata).
+        ### Three heads over the shared 1028-dim mlp_input (1024 image + 4 metadata).
         # empty / color are easy -> a single Linear each.
         self.empty_head = nn.Linear(1024 + 4, 1)
         self.color_head = nn.Linear(1024 + 4, 2)
@@ -283,23 +277,32 @@ class SquareClassifierMultiHead(nn.Module):
 
 
 if __name__ == "__main__":
-    model = SquareClassifier()
-    n_params = sum(p.numel() for p in model.parameters())
-    n_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    # Parameter-count breakdown for each model, per block and per layer:
+    #     uv run python -m chess_assistant.model.model
+    # Worth keeping an eye on: there are only ~10k square crops of training data, so the
+    # parameter budget is the constraint that decides how far these models can be pushed.
+    for model_class in (SquareClassifier, SquareClassifier2, SquareClassifierMultiHead):
+        model = model_class()
+        n_params = sum(p.numel() for p in model.parameters())
+        n_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-    print(f"Parameters: {n_params} | Trainable: {n_trainable_params}\n")
+        print(f"=== {model_class.__name__} ===")
+        print(f"Parameters: {n_params} | Trainable: {n_trainable_params}\n")
 
-    for name, module in model.named_children():
-        n_params = sum(p.numel() for p in module.parameters())
-        print(f"{name} {n_params}")
+        for name, module in model.named_children():
+            n_params = sum(p.numel() for p in module.parameters())
+            print(f"{name} {n_params}")
 
-    print("")
+        print("")
 
-    for name, module in model.named_modules():
-        if name == "":
-            continue
-            
-        n_params = sum(p.numel() for p in module.parameters(recurse=False)) # recurse=False -> don't double count params in the children
+        for name, module in model.named_modules():
+            if name == "":
+                continue
 
-        if n_params > 0:
-            print(f"{name}: {n_params}")
+            # recurse=False -> don't double count params in the children
+            n_params = sum(p.numel() for p in module.parameters(recurse=False))
+
+            if n_params > 0:
+                print(f"{name}: {n_params}")
+
+        print("")

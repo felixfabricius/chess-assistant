@@ -19,11 +19,17 @@ from chess_assistant.model.config import (
 _split_data_cache = {}
 
 def evaluate(model, dataloader, loss_fns, loss_weights, split, csv_path, device):
+    """Evaluate the multi-head model on `split` and return a dict of W&B-loggable metrics.
+
+    Two levels:
+      - Square level, from the dataloader: per-head losses (empty / color / type) and their
+        confusion matrices, plus the reconstructed 13-way loss, accuracy and confusion matrix.
+        The 13-way view is kept because it is comparable with the single-head models 1 & 2, and it
+        is what drives checkpoint selection.
+      - Board level, from the CSV: see below. Per-square accuracy is only a proxy; what the robot
+        actually needs is to get the MOVE right, so that is measured directly.
+    """
     model.eval() # important for batch norm; want to use mean and sd that were accumulated during training
-    ### Calculate:
-        # per-head losses (empty / color / type) and their confusion matrices
-        # the reconstructed 13-way square loss + accuracy + confusion matrix (kept for
-        #   comparability with the single-head models 1 & 2 - drives checkpoint selection)
     n = len(dataloader.dataset)
 
     empty_loss_sum = 0.0
@@ -121,13 +127,13 @@ def evaluate(model, dataloader, loss_fns, loss_weights, split, csv_path, device)
         type_targets, type_preds, [f"{i:02d}_{INVERSE_TYPE_MAP[i]}" for i in range(6)]
     )
 
-    ### On position level
-        # check if current position is valid - this should also be returned from dataloader
-        # if it is; then return previous fen
-        # then get the machinery going: predict all the square in one board position
-        # note: this dataloader should therefore perhaps operate at this slightly higher level?
-        # i.e. we always want to make predicitons for al the squares of a board - don't want to mix
-        # between boards.
+    ### On board level
+    # Per-square accuracy is not the metric that matters: 63 correct squares and one wrong one can
+    # still produce the wrong move, and a wrong square on an irrelevant part of the board costs
+    # nothing. So the whole production pipeline is run here - BoardEstimator over the 64 crops of
+    # a position, then ChessGame.estimate_move to rank the legal moves against that estimate - and
+    # top-1 MOVE accuracy is scored. Squares can't be shuffled across boards for this, so it reads
+    # data.csv directly rather than going through the dataloader.
     cache_key = (str(csv_path), split)
     if cache_key not in _split_data_cache:
         _split_data_cache[cache_key] = (
@@ -139,7 +145,7 @@ def evaluate(model, dataloader, loss_fns, loss_weights, split, csv_path, device)
         )
     data = _split_data_cache[cache_key]
 
-    # For each of the unique positions,
+    # Each unique image_id is one board position (64 rows in the CSV).
     board_position_ids = data.unique("image_id")["image_id"]
 
     correct_moves = 0
@@ -147,8 +153,8 @@ def evaluate(model, dataloader, loss_fns, loss_weights, split, csv_path, device)
     n_valid = 0
 
     for board_position_id in board_position_ids:
-        # TODO: perhaps write test to check that .first() would yield same exact result
-        # as .unique()
+        # The 64 rows of a position all carry the same setup/FEN/move, so .first() is enough.
+        # TODO: assert that in a test rather than trusting it.
         board_position_data = (
             data.filter(pl.col("image_id").eq(board_position_id))
             .select(
@@ -179,15 +185,18 @@ def evaluate(model, dataloader, loss_fns, loss_weights, split, csv_path, device)
             if len(estimated_moves) == 0:
                 continue
 
-            # This returns list of moves
+            # estimated_moves is the legal moves, best-scoring first.
             if estimated_moves[0]["move"] == board_position_data["move_uci"]:
                 correct_moves += 1
 
             for i, scored_move in enumerate(estimated_moves):
                 if scored_move["move"] == board_position_data["move_uci"]:
+                    # Normalised rank of the true move: 1.0 when it is ranked first.
+                    # TODO: open question whether the denominator should be len(estimated_moves)
+                    # or len(estimated_moves) - 1. As written, the worst-ranked move scores
+                    # 1/n rather than 0, so the metric never reaches its floor; dividing by
+                    # n - 1 would make it span the full [0, 1] but is undefined for n == 1.
                     correct_move_normalised_rank.append(1 - i / len(estimated_moves))
-                    # TODO: should not divide by len(estimated_moves) - 1; should be
-                    # len(estimated_moves)
                     continue
 
             n_valid += 1

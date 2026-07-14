@@ -1,3 +1,8 @@
+"""Tests for squareDataset / create_dataloader: the shapes, dtypes and decomposed targets the
+training loop relies on, and the guarantee that the augmentation pipeline leaves the mask channel
+alone. Needs the generated dataset (data/generated/data.csv) on disk.
+"""
+
 import pytest
 import torch
 from torchvision.transforms import v2
@@ -39,12 +44,13 @@ def test_transform(dataset):
     ]
 )
 def test_mask_transform(mask):
-    # Test that none of the mask pixel values are modified
+    # The photometric augmentations must leave a tv_tensors.Mask untouched: put the same mask
+    # through the train and the eval pipeline and the pixel values should still agree.
     mask = tv_tensors.Mask(mask)
     modified_train_transform = v2.Compose([transform for transform in TRAIN_TRANSFORM.transforms[:-1]])
-        # This omits the last transform in train transform, the RandomAffine one,
-        # which is the only one that's meant to affect the mask.
-        # If order of transforms changes, test might have to be adjusted. 
+        # Drops the last transform of TRAIN_TRANSFORM, RandomAffine - the one geometric transform,
+        # and so the only one that IS meant to move the mask.
+        # If the order of the transforms changes, this test has to be adjusted.
     train_transformed_mask = modified_train_transform(mask)
     eval_transformed_mask = EVAL_TRANSFORM(mask)
     torch.allclose(train_transformed_mask, eval_transformed_mask, atol=1e-7)

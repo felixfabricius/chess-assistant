@@ -1,3 +1,8 @@
+"""Dataset and dataloader for the square classifier: one row of data/generated/data.csv is one
+square crop, and the images themselves are the 4-channel (RGB + mask) arrays written next to each
+crop by the data-generation pipeline.
+"""
+
 import polars as pl
 import numpy as np
 import json
@@ -23,9 +28,15 @@ TRAIN_TRANSFORM = v2.Compose([
 EVAL_TRANSFORM = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)])
 
 class squareDataset(Dataset):
+    """The rows of data.csv belonging to one setup split, as (image, metadata, is_piece,
+    color_target, type_target) tuples.
+
+    Splits are by *setup*, not by square, so no board setup ever appears in more than one split.
+    TRAIN_TRANSFORM (augmentation) is applied on the train split, EVAL_TRANSFORM on val/test.
+    """
     def __init__(
-        self, 
-        csv_path: Path = Path("data/generated/data.csv"), 
+        self,
+        csv_path: Path = Path("data/generated/data.csv"),
         split: str = "train",
         train_transform= v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)]),
         eval_transform = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)]),
@@ -39,10 +50,6 @@ class squareDataset(Dataset):
         self.target_transform = target_transform
         self.setup_metadata_store = {}
 
-        # TODO: support transforms;
-        # Transform images using torchvision v2 transforms ToImage, ToDtype etc. 
-        # Transform targets into integer labels
-
     def __len__(self):
         return self.data.height
 
@@ -55,30 +62,27 @@ class squareDataset(Dataset):
         # The CSV stores the annotated-image path; the model input is the 4-channel masked
         # array saved alongside it in the same per-square directory.
         img_path = Path(raw_path).parent / f"{square}_masked.npy"
-            # TODO: not sure this way of accessing polars row item is robust to having no rows with that split.
         image = np.load(img_path)
 
         if self.transform:
-            # TODO: reomve this workaroud. only reason I can't simply
-            # self.transform(image) is that my mask values are currently
-            # in {0, 1} rather than {0, 255}, so scale would make them too
-            # small
+            # TODO: remove this workaround. The only reason the RGB and the mask can't go through
+            # self.transform(image) together is that the mask values are in {0, 1} rather than
+            # {0, 255}, so ToDtype(scale=True) would shrink them to almost nothing.
             rgb = image[..., :3]
-            mask = tv_tensors.Mask(image[..., 3]) 
-                # CAREFUL: can't do .unsqueeze(dim=0) operation here; 
-                # reason: this would downgrade the mask to a normal tensor
+            mask = tv_tensors.Mask(image[..., 3])
+                # CAREFUL: no .unsqueeze(dim=0) here - that would downgrade the mask back to a
+                # plain tensor, and the tv_tensors.Mask wrapper is the whole trick: the v2
+                # transforms apply GEOMETRIC ops (RandomAffine) to it, so the mask keeps tracking
+                # the square, but skip PHOTOMETRIC ones (ColorJitter, GaussianBlur, GaussianNoise),
+                # so the mask stays a clean 0/1 indicator instead of being jittered into noise.
 
             # Note that the same transform object transforms differently each time
             transformed_rgb = self.transform(rgb)
             transformed_mask = self.transform(mask).unsqueeze(dim=0) # only unsqueeze now!!
-                # the transforms that we don't want this to impact will not impact this!
-                # e.g. v2.ToImage(), v2.GaussianNoise(...), ...
-            
+
             image = torch.cat([transformed_rgb, transformed_mask], dim=0)
-            # Note that shape is now (4, H, W) (rather than (H, W, 4))
-            # Note also that type(transformed_image) is torch.Tensor
-            # rather than a torchvision image (which is a subclass of Tensor)
-            # and which can be useful for more advanced image transformations
+            # Shape is now (4, H, W) rather than (H, W, 4), and the type is a plain torch.Tensor
+            # rather than a torchvision image (a Tensor subclass, useful for further transforms).
         if not isinstance(image, torch.Tensor):
             raise TypeError("images must be torch tensors. Pass transform to ensure.")
 
@@ -102,15 +106,10 @@ class squareDataset(Dataset):
 
         return image, metadata, is_piece, color_target, type_target
 
-        # TODO: for val/test we may also want image_id (to test if equal for all); valid_game_position; previous_board_fen; board_fen; move_uci
-        # Issue with the dataloader approach to "randomly" get just images from one board position in one batch
-        # As soon as just one row is removed from the CSV, this might no longer work
-        # Alternative approach: load data.csv; then get some mask for the 
-        # valid game positions in the current split;
-        # Then for each of those board positions, perhaps call BoardEstimator with estimate_board.
-        # (we already have the square_dir)
-        # Perhaps need to reinitialise each each time with the previous FEN.
-        # I think this second approach is neater!
+    # Note on board-level evaluation: batching the 64 squares of one position together through
+    # this Dataset was considered and abandoned - it silently breaks as soon as a single row is dropped
+    # from the CSV. model/evaluate.py instead re-reads data.csv, walks the valid game positions of
+    # the split, and runs the real BoardEstimator over each position's squares directory.
 
 
 def create_dataloader(
@@ -124,7 +123,10 @@ def create_dataloader(
     eval_transform = EVAL_TRANSFORM,
     target_transform = decompose_label,
     csv_path = Path("data/generated/data.csv"),
-):  
+):
+    """A DataLoader over the given split of data.csv. num_workers / persistent_workers /
+    pin_memory come straight from the Hydra config (see model/config.yaml).
+    """
     if split not in ["train", "val", "test"]:
         raise ValueError(f"Split must be of type train, val or test. Got {split}.")
     dataset = squareDataset(

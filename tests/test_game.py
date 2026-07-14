@@ -22,11 +22,10 @@ def make_game():
 
 
 def create_board_estimate(square_occupants: dict[str, str]):
-    """
-    Creates a board where by default all squares are equally likely to be 
-    occupied by any figure.
-    Then modifies this board so that the squares in square_occupants are 
-    occupied by the corresponding value.
+    """A BoardEstimate in which every square is, by default, equally likely to hold any piece
+    (all 13 scores left at 0), except the squares named in square_occupants, which are given an
+    overwhelming score for the piece they map to. Just enough signal for estimate_move to have
+    exactly one sensible answer.
     """
     for piece in square_occupants.values():
         assert piece in TARGET_MAP.keys() # "empty", "K", "Q", ...

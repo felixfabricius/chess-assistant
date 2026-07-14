@@ -1,3 +1,6 @@
+"""
+Getting the robot ready to play: either run a fresh calibration, or reuse the last one.
+"""
 import yaml
 import os
 from datetime import datetime
@@ -7,6 +10,19 @@ import json
 from chess_assistant.calibration import calibrate, position_robot
 
 def setup(mini):
+    """
+    Prepare a setup directory and put the robot in its capture pose.
+
+    Driven by `setup_folder.create_new` in config.yaml. If set, a new timestamped setup dir is
+    created and calibrate() walks the user through clicking the board corners; otherwise the
+    most recent setup dir is reused and the robot is simply moved back to the pose recorded in
+    its metadata -- so a game can be resumed without re-calibrating, as long as neither the
+    board nor the robot has moved.
+
+    Returns (setup_dir, pixel_coordinates, robot_pose): the directory every image of this
+    session is written to, the four clicked board corners in pixels, and the (height_mm,
+    pitch_deg) pose that main.py replays before each capture.
+    """
     with open("config.yaml", "r") as f:
         config = yaml.safe_load(f)
     root_data_folder = Path(config.get("root_data_folder", "data"))
@@ -39,12 +55,11 @@ def setup(mini):
         robot_pose = (calibration_data["height_mm"], calibration_data["pitch_deg"])
 
     else:
-        # assert that root data folder exists and contains at least one file
         assert root_data_folder.is_dir()
         folders = os.listdir(root_data_folder)
         assert len(folders) > 0
-        
-        # This will return the folder associated with latest timestamp
+
+        # Setup dirs are named by timestamp, so the last one alphabetically is the most recent.
         setup_dir = root_data_folder / sorted(folders)[-1]
 
         with open(setup_dir / "metadata.json", "r", encoding="utf-8") as f:

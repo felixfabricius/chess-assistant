@@ -1,3 +1,16 @@
+"""Turn a raw camera frame into the 64 masked per-square crops the CNN sees.
+
+``Processor`` freezes everything that depends only on a setup's calibration (undistortion maps,
+the padded board homography, and all 64 mask polygons + crop boxes) at construction time, so
+gameplay and the offline batch only pay for undistort -> warp -> cutout per frame.
+
+A square's crop is deliberately *not* the square itself: it is the convex hull of the square's
+floor quad and the quad the same corners project to at piece height ("ceiling"). That hull is
+the 3D column of space above the square — which is where the piece actually is — so a crop
+contains its own piece even though pieces lean away from the camera and overhang their
+neighbours. ``Processor.__init__`` explains how the ceiling is derived from calibration.
+"""
+
 from dataclasses import dataclass
 from pathlib import Path
 import cv2
@@ -188,11 +201,11 @@ class SquareGeometry:
 
 class Processor:
     def __init__(self, metadata_source, config_path: Path | None = None) -> None:
-        """
-        Store attributes:
-        - how many pixels to allocate for padding in each direction
-        - size of output image (accounting for padding)
-        - matrix to use for image warping (accounting for padding)
+        """Freeze the per-setup geometry: padding, warp matrix, undistort maps, square geometry.
+
+        The warped canvas is the board plus padding on each side. The padding is not decorative:
+        pieces lean away from the camera, so their tops project *outside* the board quad, and the
+        canvas has to be big enough to still contain them.
 
         ``metadata_source`` is either a path/str to a ``calibration_metadata.json`` file or an
         already-loaded calibration dict. The dict form lets the calibration UI build the same
@@ -216,9 +229,9 @@ class Processor:
             with open(metadata_source, "r", encoding="utf-8") as f:
                 metadata = json.load(f)
 
-        # TODO
-        # Order of ordered_corners
-        # Dict which stores e.g. {"tl": "a8"}
+        # Which board square sits in each visual corner of the frame, e.g. {"tl": "a8"}. The
+        # robot can be placed on any side of the board, so this (inferred at calibration time)
+        # is what pins the image's orientation to the board's own coordinates.
         self.corner_map = metadata["camera_natural_orientation"]["order"]
 
         src = np.array(
@@ -242,11 +255,9 @@ class Processor:
 
         matrix_initial = cv2.getPerspectiveTransform(src, dst_initial)
 
-        # Use initial matrix to transform the extended corners and calculate padding based on that
-        # At this point we have:
-            # metadata["extended_corners_px"]["a8"]
-            # and self.corner_map also taken from metadata["corner_map"], which e.g. does "tl": "a8"
-        # Calculate pixel position of extended pixels.
+        # The "extended" corners are the clicked piece-tops above each board corner. Push them
+        # through the unpadded homography to see how far outside the board quad they land — that
+        # overhang is exactly the padding the canvas needs in each direction.
         src_extended_corners = np.array(
             [
                 metadata["extended_corners_px"][corner_square]
@@ -258,27 +269,18 @@ class Processor:
 
         dst_extended_corners_initial = (
             cv2.perspectiveTransform(
-                src_extended_corners.reshape(4, 1, 2), # this is expected format
+                src_extended_corners.reshape(4, 1, 2),  # cv2 wants (N, 1, 2) here
                 matrix_initial
-            ) # this yields array with shape (4, 1, 2)
+            )
             .reshape(4, 2)
-        ) # this is now in familiar format and can be compared with the dst array
+        )
 
-        # Get padding
-        # Recall that order corresponds to tl, tr, br, bl
-        pixel_differences = dst_extended_corners_initial - dst_initial 
-            # Subtraction will be item-by-item
-            # Interpreting result:
-            # Subtracting the pixels yields 4 vectors
-            # First element of each of those 4 vectors will be x-difference.
-                # If > 0, then extended corner is projected further to the right
-                  # e.g. for the tr corner, with my current setup, would expect to get
-                  # first element > 0 
-                # If < 0: then extended corner is projected further to the left
-            # Second element:
-                # y-difference. If > 0, then extended corner is further below -> need to pad downwards
-                # if < 0, extended corner is further above
-            # Can extract padding by taking the maximum of these dimensions
+        # One (dx, dy) overhang per corner, in tl, tr, br, bl order. Sign convention: dx > 0
+        # means the extended corner projects further right than the board corner it sits above
+        # (so the canvas must grow to the right), dx < 0 further left; dy > 0 further down,
+        # dy < 0 further up. The padding in a direction is the largest overhang in that direction.
+        pixel_differences = dst_extended_corners_initial - dst_initial
+
         # v2 calibration adds a measured "center" extension point (its base is the board
         # centre, derived from the homography at board coord (0.5, 0.5); only its extended
         # position is clicked). Correctness fix vs the old 4-corner-only padding: the measured
@@ -418,10 +420,12 @@ class Processor:
     def _build_square_geometry(self) -> dict:
         """Precompute every square's mask polygon + crop box once, in the padded warped frame.
 
-        Per floor corner: direction = unit vector toward ``self.V``; magnitude = the quadrant
-        field at that corner's board coord ``(u, v)``; ceiling = corner + direction * magnitude.
-        The mask polygon is the convex hull of the 4 floor + 4 ceiling corners; the crop box is
-        that hull's (margin-expanded) bounding box, clamped to the canvas.
+        Per floor corner: ceiling = corner + the extension field evaluated at that corner's board
+        coord ``(u, v)`` — the interpolated *measured* base->extended displacement, deliberately
+        not a ray aimed at ``self.V`` (see ``__init__``). The mask polygon is the convex hull of
+        the 4 floor + 4 ceiling corners, so it spans the whole column of space above the square,
+        which is where the piece standing on it actually appears. The crop box is that hull's
+        (margin-expanded) bounding box, clamped to the canvas.
         """
         square_size = self.board_size // 8
         pl, pu = self.padding["left"], self.padding["up"]
@@ -476,66 +480,21 @@ class Processor:
         warped_image = cv2.warpPerspective(image, self.matrix, self.image_size)
         warped_image_path = image_path.parent / (str(image_path.stem) + "_warped.png")
         cv2.imwrite(str(warped_image_path), warped_image)
-        # Note that in this case there is no need to specify some color map transformation
-        # That is only needed, when passing the image to something that expects RGB
+        # No colour conversion here: the image stays BGR end to end. It is only converted to RGB
+        # at the point where it is handed to something that expects RGB (see the .npy crops).
         return warped_image_path
     
     def cutout(self, warped_image_path):
-        """
-        Use self.corner map to accurately label squares
-        That maps e.g. "tl": "a8"
-        
-        Question: how to adequately determine pixel position of a given square, 
-        given 
-        - self.padding
-        - self.size
-        - and self.corner_map
+        """Write the 64 per-square crops (masked ``.npy`` + annotated PNG + metadata) to disk.
 
-        If we have tl: a8, then it's quite easy.
-        Just find position of bottom left corner.
-        Then given bottom left corner, use self.padding and self.size 
-        to get adequate corners for the crop.
+        Returns the ``squares/`` directory next to the warped image. Squares are addressed by
+        their ``(i, j)`` grid position — ``i`` counting rows down from the top of the image,
+        ``j`` counting columns left to right — and the map from ``(i, j)`` to a label like "e2"
+        depends on which board corner the camera happens to see in the top left; see
+        ``_compute_square_labels`` / ``self.corner_map``.
 
-        This approach to finding the pixel positions of a square also works if another 
-        square is in the top left. Yes. 
-
-        Question is just: how to label, given e.g. the pixel coordinate of the bottom left
-        corner of a square. (Here bottom left means "bottom left in the image").
-        Let's also say we know the square increment.
-
-        Let's do the loop such that we change the pixel coordinate of the bottom 
-        left corner of square.
-        How: subtract 1, 2, ..., 8 times square height from the y-coordinate (i index)
-        And add: 0, 1, 2, ..., 7 times the square width (= square height) to the x-coordinate (j index)
-
-        How to use this for square labelling?
-        If top left = a8:
-            - Vertical:
-              i = 1 -> 8; i = 2 -> 7 etc.
-            - Horizontal:
-              j = 0 -> a, j = 1 -> b, ...
-        
-        Elif top left = a1:
-            - Vertical:
-              i = 1 -> a, i = 2 -> b, i = 3 -> c, ...
-            - Horizontal:
-              j = 0 -> 1, j = 1 -> 2, j = 3 -> c, ...
-        
-        Elif top left = h1:
-            - Vertical:
-              i = 0 -> 1, i = 1 -> 2, ...
-            - Horizontal:
-              j = 0 -> h, j = 1 -> g, ...
-        
-        Elif top left = h8
-            - Vertical:
-              i = 1 -> h, i = 2 -> g, ...
-            - Horizontal:
-              j = 0 -> 8, j = 1 -> 7, ...
-        
-        # Maybe just hardcord these maps once?
-
-
+        Dispatches to ``_cutout_v2`` when the calibration carried the geometry to build real
+        per-square masks. v1 metadata has no such geometry and falls through to the legacy path.
         """
         warped_image = cv2.imread(warped_image_path)
 
@@ -544,23 +503,15 @@ class Processor:
         if self.square_geometry is not None:
             return self._cutout_v2(warped_image, warped_image_path.parent / "squares")
 
-        # --- Legacy v1 path: fixed global padding + hard axis-aligned rectangle mask ---
-        # We loop over the pixel coordinates of the bottom left corner of different squares.
-        # We start at the bottom left corner of the top-left square.
-        # Then via the outer for-loop we increment the vertical coordinate.
-            # Note that starting at the top-left corner of the chessboard, to reach the
-            # top left coordinate of each square, we need to subtract the height of a square
-            # 0, 1, ..., 7 times. Index i represents the nuber of times we subtract.
-        # Via the inner for-loop we increment the horizontal coordinate.
-            # Note that starting at the top-left corner of the chessboard,
-            # to reach the x-coordinate that corresponds to the
-            # left side of the next-left square, we need to add the pixel width of a square
-            # 0, 1, ..., 7 times. Index j represents the number of times we add.
-        # Depending on which corner of the chess board is at the top-left corner of the image
-        # from the robot's perspective, the map from indices i and j (which uniquely identify)
-        # a square on the image since they identify the bottom-left pixel coordinate of that square)
-        # to the square label (e.g. "e2") differs. 
-        # Here we just manually specify it for the four options.
+        # --- Legacy v1 path: the same fixed global padding around every square, and a hard
+        # axis-aligned rectangle mask. Superseded by _cutout_v2's per-square convex hull, but
+        # kept so setups calibrated before v2 can still be processed. ---
+        # Walk the grid from the top-left square: the outer loop steps i down the rows (adding
+        # one square height to y each time), the inner loop steps j across the columns (adding
+        # one square width to x). (i, j) therefore uniquely identifies a square in the image.
+        # Which board square that *is* depends on the corner the camera sees in the image's top
+        # left — the robot may stand on any side of the board — so all four cases are spelled out
+        # by hand below.
         files = ["a", "b", "c", "d", "e", "f", "g", "h"]
         ranks = [str(i) for i in range(1, 9)]
         label_map = {
@@ -586,8 +537,7 @@ class Processor:
         is_reverse = self.corner_map["tl"] in ["a1", "h8"]
         label_map = label_map[self.corner_map["tl"]]
 
-        # Square size
-        square_size = self.board_size // 8 # this should be multiple of 8 anyways
+        square_size = self.board_size // 8 # board_size is expected to be a multiple of 8
 
         # Top left coordinates of top-left square
         tl_y = self.padding["up"]
@@ -608,22 +558,18 @@ class Processor:
                     else label_map[0][i] + label_map[1][j]
                 )
 
-                # Create cutout
-                # Cropping works using numpy slices.
-                # Axis 0: y, axis 1: x, axis 2: colours
+                # Crop by numpy slicing: axis 0 is y, axis 1 is x, axis 2 is colour.
                 square_cutout = warped_image[top:bottom, left:right]
 
-                # Now I'm interested in top, bottom, left, right of the actual SQUARE,
-                # not the cutout, in the cutout image
-                square_left_cutout = self.padding["left"] 
-                    # this is pixel coordinate in x direction of the left edge of the square
-                    # in the cutout
-                    # where the square is located, depends just on the padding
+                # Where the square itself sits *inside* its crop. Because every crop is the
+                # square plus the same global padding, this is the same box for all 64 of them.
+                square_left_cutout = self.padding["left"]
                 square_right_cutout = self.padding["left"] + square_size
                 square_top_cutout = self.padding["up"]
                 square_bottom_cutout = self.padding["up"] + square_size
 
-                 # Add a fourth masking channel
+                # Add a fourth channel: 1 over the square, 0 over the surrounding padding, so the
+                # model can tell which part of the crop is the square it is being asked about.
                 mask = np.zeros_like(square_cutout[:,:,0])
                 mask[square_top_cutout:square_bottom_cutout, square_left_cutout:square_right_cutout] = 1
                 square_cutout_masked = np.concatenate([square_cutout, np.expand_dims(mask, mask.ndim)], axis=2)
@@ -642,8 +588,8 @@ class Processor:
 
                 square_cutout_annotated = square_cutout.copy()
 
-                # Convert global warped-image coordinates to local crop coordinates
-                # i.e. coordinates of the warped image
+                # The square's own corners, in the full warped image, converted below into the
+                # crop's local coordinates so they can be dotted onto the annotated crop.
                 corners_global = [
                     (square_left, square_top),
                     (square_left, square_bottom),
@@ -662,20 +608,15 @@ class Processor:
                         -1,
                     )
                 
-                # Square path
-                # Folder structure will be:
-                    # board setup (with raw.png and metadata)
-                    # many snapshots.
-                        # snapshot
-                        # warped_image
-                        # cutouts
+                # On-disk layout: one directory per setup (raw.png + calibration metadata),
+                # containing one directory per captured frame, each with its warped image and a
+                # squares/<label>/ directory like this one.
                 square_dir = squares_dir / square_label
-                square_dir.mkdir(exist_ok=True) # exist_ok=True for debugging purposes                
+                square_dir.mkdir(exist_ok=True) # exist_ok=True for debugging purposes
 
-                # Save metadata for square
                 square_metadata = {
-                    # Save pixel coordinates of top left of square within metadata
-                    # so model can learn e.g. that pieces further away from the camera appear larger
+                    # Position of the crop in the warped image. Kept so the model can pick up on
+                    # e.g. pieces nearer the camera appearing larger.
                     "top": top,
                     "left": left
                 }
@@ -747,18 +688,18 @@ class Processor:
 
         return squares_dir
 
+
 if __name__ == "__main__":
+    # Warp one frame and write its 64 square crops next to it. Useful for eyeballing a
+    # calibration (the annotated crops show the hull and the square's corners) without the robot.
+    #
+    #   uv run python -m chess_assistant.image_processing \
+    #       <calibration_metadata.json> <config.yaml> <image.png>
+    #
+    # e.g. uv run python -m chess_assistant.image_processing \
+    #       data/raw_images/calibration_metadata.json config.yaml data/raw_images/raw.png
     import sys
     assert len(sys.argv) == 4
-    # Example:
-    """
-    uv run python -m chess_assistant.image_processing data/raw_images/calibration_metadata.json config.yaml data/raw_images/raw.png
-    """
-    # Pass the arguments that Processor class requires when initialised:
-        # metadata_path
-        # config_path
-    # And also pass the argument that warp method requires:
-        # image path
     processor = Processor(sys.argv[1], sys.argv[2])
     warped_path = processor.warp(Path(sys.argv[3]))
     processor.cutout(warped_path)

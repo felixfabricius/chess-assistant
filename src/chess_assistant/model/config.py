@@ -1,3 +1,9 @@
+"""Label and metadata encodings shared by training (model/data.py, model/train.py,
+model/evaluate.py) and inference (vision.py), plus the two functions that convert between the
+13-way label space and the multi-head model's factored one. Anything both sides need to agree on
+lives here, so the two encodings cannot drift apart.
+"""
+
 import torch
 import torch.nn.functional as F
 
@@ -44,8 +50,12 @@ def reconstruct_13way_logprobs(logit_empty, logits_color, logits_type):
     Combine the three heads into log-probabilities over the original 13-way TARGET_MAP
     labels, under a conditional-independence assumption between color and type given
     non-empty. Shape: (..., 13), indexed per TARGET_MAP / INVERSE_TARGET_MAP.
-    Numerically stable (logsigmoid/log_softmax, no epsilon-clamping needed). Safe to feed
-    directly into nn.CrossEntropyLoss or argmax, exactly like the old single-head logits.
+
+    Everything stays in log space via logsigmoid / log_softmax, so this is numerically stable
+    and needs no epsilon-clamping. The result is a normalised log-probability vector, and since
+    softmax(log p) == p it is a drop-in replacement for the old single-head logits: feeding it to
+    argmax, to nn.CrossEntropyLoss, or to the softmax that game.py re-applies downstream all give
+    the intended answer.
     """
     # The empty head is trained with BCEWithLogitsLoss against `is_piece` (1 = piece), so
     # sigmoid(logit_empty) == P(piece). `logit_empty` is therefore a piece-logit despite its

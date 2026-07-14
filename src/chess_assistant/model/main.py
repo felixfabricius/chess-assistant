@@ -1,3 +1,19 @@
+"""Training entry point: Hydra for the config, Weights & Biases for the logging.
+
+    uv run python -m chess_assistant.model.main
+    uv run python -m chess_assistant.model.main model=2 training.epochs=10
+    uv run python -m chess_assistant.model.main +debug=true
+
+Defaults live in model/config.yaml and any of them can be overridden on the command line.
+`debug` and `prefix` are the exception: they are not in config.yaml, and Hydra's struct mode
+rejects unknown keys, so they need the `+` prefix to be appended (`+debug=true` cuts each epoch
+to a few batches, for a quick smoke run).
+
+Needs a W&B API key in .env, and data/generated/data.csv to exist. The best epoch's weights are
+written to .cache/model_<run_id>.pt and uploaded as a W&B artifact; the copy the robot actually
+runs on lives in weights/ as safetensors.
+"""
+
 import torch
 import wandb
 import copy
@@ -24,9 +40,8 @@ def main(config: DictConfig):
     if config.data.weighting == "inverse_root" and config.note == "":
         config.note = "Weighting: Inverse Root"
     if config.get("debug") and not config.get("prefix"):
-        # Standard version might not work because config is in "struct mode", which
-        # is meant to prevent actual adding of keys to config
-        # config.prefix = "[test run]"
+        # A plain `config.prefix = ...` raises here: the config is in "struct mode", which exists
+        # to stop typo'd keys being silently added. force_add is the sanctioned way through.
         OmegaConf.update(config, "prefix", "test run", force_add=True)
     run_name = (
         f"{('[' + config.get('prefix') + '] | ') if config.get('prefix') else ''}"
@@ -170,16 +185,13 @@ def main(config: DictConfig):
         # Update best model
         if val_metrics["eval/square/avg_loss"] < lowest_loss:
             lowest_loss = val_metrics["eval/square/avg_loss"]
+            # These are snapshotted on whatever device training is running on. When that is CUDA,
+            # the model weights and the AdamW momentum buffers are CUDA tensors and get pickled
+            # with their device info, so a plain torch.load() on a GPU-less machine crashes; load
+            # such a checkpoint with map_location="cpu". Moving the tensors to CPU here instead was
+            # considered and rejected: model.to("cpu") moves the model in place, mid-training.
             best_model_state = copy.deepcopy(model.state_dict())
             optimizer_state = copy.deepcopy(optimizer.state_dict())
-                # Reason for .to("cpu") here: if device is CUDA, then state_dict()
-                # and the AdamW momentum buffers in optimizer.state_dict()
-                # contain CUDA tensors, which get pickled with their device ifo.
-                # So if in a future script I try to load this checkpoint into my
-                # GPU-less machine, plain torch.load(cache_path) would crash.
-                # Can pass map_location="cpu" to torch.load - THIS WOULD ACTUALLY BE EASIEST.
-                # Also: don't want to write 'best_model = copy.deepcopy(model.to("cpu").state_dict())'
-                # because this would move model in place
             best_epoch = epoch
 
         scheduler.step()

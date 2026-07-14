@@ -137,8 +137,8 @@ def launch_calibration_monitor(metadata_path, *, media_backend: str = "default",
 
     NOTE: this means a second simultaneous camera consumer. If your media backend does not allow
     two consumers, the monitor prints a message and exits without disturbing the game; in that
-    case run it standalone instead — ``python -m ...`` calling ``_monitor_worker(path, ...)`` —
-    from a separate terminal.
+    case check the calibration on its own instead, with the game stopped, by running this module
+    directly (see ``__main__`` below).
     """
     proc = mp.Process(
         target=_monitor_worker,
@@ -148,3 +148,17 @@ def launch_calibration_monitor(metadata_path, *, media_backend: str = "default",
     )
     proc.start()
     return proc
+
+
+if __name__ == "__main__":
+    # Standalone viewer, for checking a calibration with the game loop stopped (the same window
+    # launch_calibration_monitor spawns, minus the second camera consumer):
+    #
+    #   uv run python -m chess_assistant.calibration_monitor data/<setup>/calibration_metadata.json
+    import sys
+
+    if len(sys.argv) != 2:
+        raise SystemExit(
+            "usage: python -m chess_assistant.calibration_monitor <calibration_metadata.json>"
+        )
+    _monitor_worker(sys.argv[1], media_backend="default", fps=10)

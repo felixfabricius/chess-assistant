@@ -45,8 +45,11 @@ PROMPT_END = (
 
 
 def format_uci_for_speech(uci_move: str) -> str:
-    """Turn 'e2e4' into 'E2 to E4' so it's said clearly instead of
-    being mangled as one run-together token."""
+    """Turn 'e2e4' into 'E2 to E4'.
+
+    Spelled out, the move is said clearly; fed in raw it gets mangled into one
+    run-together token.
+    """
     origin, destination = uci_move[:2], uci_move[2:4]
     return f"{origin.upper()} to {destination.upper()}"
 
@@ -134,6 +137,13 @@ def build_prompt(move_info: dict, cp_loss: int, history: dict, comment_history: 
 
 
 class Speaker:
+    """The robot's voice: Claude writes the commentary, Kokoro speaks it.
+
+    Also owns the pregeneration pool. A comment for a candidate move is generated on a worker
+    thread while the players are still deciding whether to accept that move, to reduce / eliminate
+    wait times due to engine, Claude and Kokoro latency.
+    """
+
     def __init__(self, mini, config=None):
         speaker_config = config.get("speaker", {}) if config is not None else {}
 

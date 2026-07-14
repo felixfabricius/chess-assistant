@@ -1,4 +1,4 @@
-"""Tests for the offline batch regeneration (Phase 2).
+"""Tests for the offline batch regeneration of already-captured frames.
 
 The single most important guarantee: regenerating a frame rewrites the geometric metadata but
 leaves every ground-truth ``"label"`` byte-identical.

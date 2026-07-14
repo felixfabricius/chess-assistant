@@ -16,6 +16,10 @@ live only in each square's ``_metadata.json`` (and the CSV). So each square's ex
 
 Reads camera intrinsics from each setup's metadata, so the batch never imports ``reachy_mini``
 and the worker is a plain top-level function (importable by name under Windows "spawn").
+
+Run with ``uv run python -m chess_assistant.regenerate [--data-root DIR] [--config FILE]
+[--workers N]``; the defaults regenerate everything under ``data/generated`` using ``config.yaml``
+and one worker process per CPU.
 """
 
 from __future__ import annotations

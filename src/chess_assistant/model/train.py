@@ -1,9 +1,14 @@
 def train(model, dataloader, loss_fns, loss_weights, optimizer, debug, device):
-    """
+    """Run one epoch over the training split and return the losses of the last ~20% of batches.
+
     loss_fns: dict with keys "empty" (BCEWithLogitsLoss), "color" / "type" (CrossEntropyLoss
               with ignore_index=IGNORE_INDEX so empty rows are skipped automatically).
     loss_weights: dict with keys "empty"/"color"/"type" combining the three heads into the
                   single scalar that is back-propagated.
+    debug: stop after a handful of batches (smoke run); the reported losses are then all zero.
+
+    Only the tail of the epoch is averaged, because the early batches of an epoch are stale by
+    the time it ends and would drag the number away from where the model actually is.
     """
     model.train()
     n_batches = len(dataloader)

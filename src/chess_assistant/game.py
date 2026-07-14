@@ -1,3 +1,11 @@
+"""
+The game itself: board state, inferring the played move from a board estimate, and rating
+moves with Stockfish.
+
+Finding the engine is the fiddly part (see resolve_stockfish_path), so it is deliberately
+kept optional: nothing in the board-reading path spawns an engine, and ChessGame only
+launches one the first time somebody asks for an evaluation.
+"""
 import os
 import shutil
 import threading
@@ -64,11 +72,19 @@ def resolve_stockfish_path(explicit: str | None = None) -> str:
 
 class ChessGame:
     """
-    Requires a method that takes as input a board prediction, and based on that
-    prediction, evaluates every possible legal move for plausibility.
-    Should then output the most likely move.
-    Perhaps also keep track of multiple moves. 
-    (Easier to debug: if it's not a specific move that I think it is, can try a new one.)
+    The game state, and everything the rest of the system asks of it.
+
+    Two jobs, deliberately kept independent:
+
+    1. Turning a board estimate into a move. estimate_move() scores every legal move by how
+       well the position it leads to explains what the vision model saw, and returns them all,
+       ranked. It never consults Stockfish. The whole list is returned rather than just the
+       argmax because the players confirm or reject the top suggestion out loud (see main.py):
+       when the reading is wrong, the move the players actually made is usually second or third.
+
+    2. Judging a move once it is played: centipawn loss, capture/quiet streaks, average
+       accuracy per side. This is what the commentary prompt is built from, and it is the only
+       part that needs an engine.
     """
     def __init__(
         self,
@@ -77,16 +93,15 @@ class ChessGame:
         depth=16,
         stockfish_path: str | None = None,
     ):
+        # A FEN can be passed in to continue the game from an arbitrary prior position, which is
+        # what evaluation does: it replays recorded board positions one at a time.
         fen = fen if fen is not None else "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
         self.board = chess.Board(fen=fen)
-            # allow for passing of FEN to simulate continuation of game from an
-            # arbitrary prior position during evaluation
         assert model_type in ["LLM", "CNN"]
         self.model_type = model_type
         if self.model_type == "CNN":
             self.loss_fn = nn.CrossEntropyLoss()
-        self.depth = depth
-            # maybe increase to 18 eventually
+        self.depth = depth  # engine search depth for move rating; maybe increase to 18 eventually
         # Stockfish is spawned on first use, not here -- see the engine property. estimate_move()
         # never touches it, so board reading and move ranking run with no engine installed at all.
         self._stockfish_path = stockfish_path
@@ -137,27 +152,28 @@ class ChessGame:
         return score  # centipawns, from White's perspective
 
     def estimate_move(self, board_estimate):
-        # board_estimate object has 64 fields (a1, ...)
-        # each of those fields is a square estimate object:
-            # which has some metadata fields
-            # and then also K, Q, ... along with floats for confidence.
-        # This should allow me to access the predictions I need.
-        # Score: Mean Absolute Error? Or Mean Squared Error?
-        # I think mean squared error makes sense. 
-        # Task becomes: for each move, calculate Mean Squared error, then sort by MSE.
+        """
+        Rank every legal move by how well it explains the vision model's board estimate.
 
+        For each legal move we ask: if this move was played, how badly would the resulting
+        position disagree with what the model saw? The disagreement is a loss summed over the
+        64 squares -- cross-entropy against the CNN's log-probabilities, or squared error
+        against the LLM's one-hot answers.
+
+        Returns a list of {"move", "loss", "move_info"} dicts sorted by ascending loss, i.e.
+        most plausible move first. Never touches the engine.
         """
-        Note that this initial score does not even matter! 
-        This is just a constant term we add to every move score, which therefore
-        does not impact the ordering of candidate moves.
-        """
-        # Score based on the previous board position.
+        # Loss of the *current* position under the estimate. This is a constant term added to
+        # every candidate's score, so it has no effect on the ranking whatsoever -- it is kept
+        # only because it makes the absolute loss values comparable across board positions,
+        # which is useful as an evaluation metric.
         initial_loss = 0
         for square in SQUARES:
             square_estimate = getattr(board_estimate, square)
             if self.model_type == "LLM":
+                # Squared error against the LLM's answer: it only ever gives a one-hot, so the
+                # truth-vs-estimate distance is summed over all 13 labels of the square.
                 for piece in PIECES:
-                    # TODO: this is not robust to piece_
                     piece_at_square = self.board.piece_at(chess.parse_square(square))
                     piece_at_square = "empty" if piece_at_square is None else piece_at_square.symbol()
                     if (
@@ -167,36 +183,24 @@ class ChessGame:
                         initial_loss += (1 - getattr(square_estimate, piece)) ** 2
                     else:
                         initial_loss += getattr(square_estimate, piece) ** 2
-            else: # use cross-entropy loss
+            else:
+                # Cross-entropy against the CNN's log-probabilities. The 13 scores have to be
+                # laid out in TARGET_MAP index order, which is what INVERSE_TARGET_MAP is for.
                 piece_at_square = self.board.piece_at(chess.parse_square(square))
                 piece_at_square = "empty" if piece_at_square is None else piece_at_square.symbol()
                 initial_loss += self.loss_fn(
                     torch.tensor(
                         [
                             getattr(square_estimate, INVERSE_TARGET_MAP[target])
-                            for target in range(13) 
-                            # the double for loop here is a bit convoluted;
-                            # reason: each target maps to exactly one piece; therefore
-                            # no need for iteration
-                        ]
-                        , 
+                            for target in range(13)
+                        ],
                         dtype=torch.float32
-                    ),    
+                    ),
                     torch.tensor(TARGET_MAP[piece_at_square])
                 )
 
-            # QUESTION: do I also want to take predictions for other pieces into account?
-            # E.g. 3 pieces. if i have 
-                # A: 0, 0,8, 0.2
-                # B: 0.4, 0.4, 0.2
-            # This second way (real MSE?) the score for the third piece would be lower with B.
-            # Perhaps check out some common classification losses here.
-            # Then access the prediction in board_estimate for that piece
-            # And add squared deviation to initial_score
-
         scored_moves = []
         for move in self.board.legal_moves:
-            # Score the move
             loss_increment = 0
 
             before = self.board.copy()
@@ -207,17 +211,14 @@ class ChessGame:
 
             changed_squares = []
 
-            """
-            Iterate through all squares rather than just the squares we can read out from the 
-            move in UCI notation, because there are edge cases in which >2 squares get impacted:
-                - Castling changes four squares: king from/to and rook from/to.
-                - En passant changes three squares: pawn from, pawn to, and captured pawn square.
-                - Promotion capture still works for the destination square, 
-                  but the captured piece disappears from square_to.
-            
-            # TODO: Could slightly increase speed of this by providing manual code for these edge cases
-            -> we don't always loop through all 64 squares for every move.
-            """
+            # Diff all 64 squares rather than just the two squares readable from the move in UCI
+            # notation, because there are edge cases in which more than 2 squares change:
+            #   - Castling changes four squares: king from/to and rook from/to.
+            #   - En passant changes three squares: pawn from, pawn to, and captured pawn square.
+            #   - Promotion capture still works out for the destination square, but the captured
+            #     piece disappears from square_to.
+            # TODO: could be sped up by handling those edge cases explicitly, so that we don't
+            # loop over all 64 squares for every legal move.
             for square in chess.SQUARES:
                 before_piece = before.piece_at(square)
                 after_piece = after.piece_at(square)
@@ -232,23 +233,20 @@ class ChessGame:
                         after_symbol,
                     ))
 
+            # Only the squares the move changes can change the loss, so the candidate's score is
+            # initial_loss plus a delta over those few squares: drop each changed square's old
+            # contribution, add its new one.
+            #
+            # For the LLM's squared error that delta collapses into arithmetic. The square used
+            # to hold old_piece and now holds new_piece, so with x = the estimate's score for a
+            # given piece, new_piece goes from a "wrong" term x**2 to a "right" term (1 - x)**2,
+            # i.e. we add (1 - x)**2 - x**2 = -2x + 1; old_piece goes the other way, so we
+            # subtract -2x + 1 for it. Nothing else about the square changed.
+            #
+            # CAREFUL: getattr does not support nested attribute access, so the square estimate
+            # has to be pulled out first; getattr(board_estimate, f"{square}.{piece}") does not
+            # work.
             for square, old_piece, new_piece in changed_squares:
-                """
-                For a given square:
-                1) remove the earlier contribution from old piece and new piece,
-                2) add the new contribution from old piece and new piece.
-                
-                score += (1 - getattr(board_estimate, f"{square}.{new_piece}")) ** 2
-                score -= (1 - getattr(board_estimate, f"{square}.{old_piece}")) ** 2
-
-                score -= getattr(board_estimate, f"{square}.{new_piece}") ** 2
-                score += getattr(board_estimate, f"{square}.{old_piece}") ** 2
-
-                CAREFUL: getattr does apparently not support nested attribute access.
-                
-                So for new piece, we add (1 - x) ** 2 - x ** 2 = -2x + 1
-                For old piece, we subtract -2x + 1
-                """
                 square_estimate = getattr(board_estimate, square)
                 if self.model_type == "LLM":
                     loss_increment += -2 * getattr(square_estimate, new_piece) + 1
@@ -269,11 +267,9 @@ class ChessGame:
                 "loss": initial_loss + loss_increment,
                 "move_info": move_info,
             })
-            # Computation of initial loss is not necessary; it does not affect ranking.
-            # Keeping it as an evaluation metric for now.
 
-        # Sort candiate moves by likelihood (descending), which means
-        # sort in ascending order by error impact of candidate moves
+        # Sort candidate moves by likelihood (descending), which means sorting in ascending
+        # order by how badly they disagree with the board estimate.
         scored_moves.sort(key = lambda x: x["loss"])
         return scored_moves
 
@@ -437,11 +433,3 @@ def _trailing_streak(move_log, capture):
             break
         streak += 1
     return streak
-
-
-if __name__ == "__main__":
-    game = ChessGame()
-    print(game.board)
-    for move in game.board.legal_moves: 
-        print(move)
-    print(type(next(iter(game.board.legal_moves)).uci()))

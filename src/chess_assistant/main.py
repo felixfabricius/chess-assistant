@@ -1,3 +1,15 @@
+"""
+The game loop: the robot watches a physical chess game and comments on it.
+
+Run it with the robot plugged in:
+
+    uv run python -m chess_assistant.main
+
+One iteration = one move: wait for the players to signal that they have moved, photograph the
+board, read the position, rank the legal moves against that reading, suggest the most likely
+one out loud, and -- unless the players reject it -- play it and comment on it. Everything it
+needs (calibration, engine, voice, input method) is configured in config.yaml.
+"""
 from pathlib import Path
 from omegaconf import OmegaConf
 
@@ -18,7 +30,7 @@ from reachy_mini import ReachyMini
 
 
 def main(mini) -> None:
-    
+    """Set everything up from config.yaml, then run the game loop until the game ends."""
     config = OmegaConf.load("config.yaml")
 
     setup_dir, pixel_coordinates, robot_pose = setup(mini)
@@ -46,25 +58,21 @@ def main(mini) -> None:
     make_head_rigid(mini)
 
     print("Start Game")
-    # Build game loop
     game_over = False
     i = 0
     while not game_over:
         i += 1
         print("Ready for move")
         move_made = input_detector.detect_input(type="move_made")
-        print(f"move made: {move_made}") # this should definitely be true
+        print(f"move made: {move_made}")
         # Snap the head back to the exact calibrated pose so every board image is taken from
         # the same position (the head may have drifted while operating the antennas).
         move_to_capture_pose(mini, *robot_pose)
         image_dir = capture_image(mini, setup_dir)
         print("image captured")
-        # Use antennas to get camera input
-        # Perhaps we can use camera orientation to determine on which side the white player is
-        # sitting; and then the AntennasInput class can keep track of everyhing else.
-        # Including on which side the next input needs to occur.
 
-        # Capture image from camera
+        # Rectify the board out of the photo, cut it into 64 squares, classify each of them,
+        # then ask the game which legal move best explains what was seen.
         warped_image_path = image_processor.warp(image_dir / "image.png")
         squares_dir = image_processor.cutout(warped_image_path)
         board_estimate = board_estimator.estimate_board(squares_dir)
