@@ -5,6 +5,22 @@ from chess_assistant.vision import SquareEstimate, BoardEstimate
 from chess_assistant.config import SQUARES
 from chess_assistant.model.config import TARGET_MAP
 
+
+@pytest.fixture
+def make_game():
+    """Build ChessGames and make sure their Stockfish processes are reaped."""
+    games = []
+
+    def _make(**kwargs):
+        game = ChessGame(**kwargs)
+        games.append(game)
+        return game
+
+    yield _make
+    for game in games:
+        game.close()
+
+
 def create_board_estimate(square_occupants: dict[str, str]):
     """
     Creates a board where by default all squares are equally likely to be 
@@ -37,8 +53,190 @@ def create_board_estimate(square_occupants: dict[str, str]):
         ("b1c3", {"b1": "empty", "c3": "N"})
     ]
 )
-def test_move_estimation(move_uci, square_occupants):
-    game = ChessGame(model_type="CNN")
+def test_move_estimation(move_uci, square_occupants, make_game):
+    game = make_game(model_type="CNN")
     board_estimate = create_board_estimate(square_occupants)
     move_estimate = game.estimate_move(board_estimate)
     assert move_estimate[0]["move"] == move_uci
+
+
+def test_estimate_move_attaches_move_info(make_game):
+    """Speaker and main.py both index candidate["move_info"], so estimate_move must emit it."""
+    game = make_game(model_type="CNN")
+    candidates = game.estimate_move(create_board_estimate({"e2": "empty", "e4": "P"}))
+    top = candidates[0]
+    assert top["move"] == "e2e4"
+    assert top["move_info"]["move"] == "e2e4"
+    assert top["move_info"]["san"] == "e4"
+    assert top["move_info"]["moved_piece"] == "Pawn"
+
+
+### describe_move: the flags a commentator needs, read off the pre-move board
+
+# Each case: a position, a move, and the move_info fields that must come out of it.
+DESCRIBE_CASES = [
+    pytest.param(
+        "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2",
+        "e4d5",
+        {"san": "exd5", "moved_piece": "Pawn", "turn": "white", "capture": True,
+         "captured_piece": "Pawn", "castle": None, "en_passant": False,
+         "promotion": None, "check": False, "checkmate": False},
+        id="normal_capture",
+    ),
+    pytest.param(
+        # The captured pawn stands on d5, NOT on the destination square d6, so a naive
+        # piece_at(to_square) would report captured_piece=None here.
+        "rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3",
+        "e5d6",
+        {"san": "exd6", "moved_piece": "Pawn", "capture": True,
+         "captured_piece": "Pawn", "en_passant": True, "checkmate": False},
+        id="en_passant",
+    ),
+    pytest.param(
+        "rnbqk2r/pppp1ppp/5n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4",
+        "e1g1",
+        {"san": "O-O", "moved_piece": "King", "capture": False,
+         "captured_piece": None, "castle": "kingside", "check": False},
+        id="kingside_castle",
+    ),
+    pytest.param(
+        "r3kbnr/pppqpppp/2np4/8/8/2NPB3/PPPQPPPP/R3KBNR w KQkq - 6 5",
+        "e1c1",
+        {"san": "O-O-O", "moved_piece": "King", "castle": "queenside"},
+        id="queenside_castle",
+    ),
+    pytest.param(
+        "8/P7/8/8/8/8/8/K6k w - - 0 1",
+        "a7a8q",
+        {"san": "a8=Q+", "moved_piece": "Pawn", "capture": False,
+         "promotion": "Queen", "check": True, "checkmate": False},
+        id="promotion",
+    ),
+    pytest.param(
+        "4k3/8/8/8/8/8/8/R3K3 w Q - 0 1",
+        "a1a8",
+        {"san": "Ra8+", "moved_piece": "Rook", "check": True, "checkmate": False},
+        id="check_not_mate",
+    ),
+    pytest.param(
+        # Scholar's mate.
+        "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5Q2/PPPP1PPP/RNB1K1NR w KQkq - 4 4",
+        "f3f7",
+        {"san": "Qxf7#", "moved_piece": "Queen", "capture": True,
+         "captured_piece": "Pawn", "check": True, "checkmate": True},
+        id="checkmate",
+    ),
+    pytest.param(
+        "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",
+        "e7e5",
+        {"san": "e5", "turn": "black", "move_number": 1, "capture": False,
+         "captured_piece": None, "castle": None, "en_passant": False,
+         "promotion": None, "check": False, "checkmate": False},
+        id="black_quiet_move",
+    ),
+]
+
+
+@pytest.mark.parametrize("fen, move_uci, expected", DESCRIBE_CASES)
+def test_describe_move(fen, move_uci, expected, make_game):
+    game = make_game(fen=fen)
+    # Not the fen literal above: python-chess drops an en-passant square from the FEN when
+    # no legal en-passant capture actually exists, so the round-trip is not byte-identical.
+    before = game.fen()
+
+    move_info = game.describe_move(move_uci)
+
+    assert move_info["move"] == move_uci
+    for key, value in expected.items():
+        assert move_info[key] == value, f"{key}: {move_info[key]!r} != {value!r}"
+
+    # describe_move must not mutate the board it read from.
+    assert game.fen() == before
+
+
+### cp_loss_for: the sign must follow the side that MOVES, not the side to move afterwards
+
+def test_cp_loss_punishes_a_blunder(make_game):
+    """1. f3 e5 2. g4?? hangs mate-in-one (Qh4#).
+
+    The old rate_move() read board.turn *after* pushing -- i.e. the opponent's colour --
+    which flipped the sign and clamped every blunder to 0. This is the regression guard.
+    """
+    game = make_game()
+    game.apply_move("f2f3")
+    game.apply_move("e7e5")
+
+    cp_loss, _ = game.cp_loss_for("g2g4")
+    assert cp_loss > 500
+
+
+def test_cp_loss_forgives_a_good_move(make_game):
+    game = make_game()
+    cp_loss, _ = game.cp_loss_for("e2e4")
+    assert cp_loss < 60
+
+
+def test_cp_loss_for_does_not_mutate(make_game):
+    game = make_game()
+    before = game.fen()
+    score_before = game.recent_position_score
+
+    game.cp_loss_for("e2e4")
+
+    assert game.fen() == before
+    assert game.recent_position_score == score_before
+    assert game.move_log == []
+
+
+def test_apply_move_reuses_supplied_rating(make_game):
+    """main.py hands apply_move the cp_loss the worker already computed, so it must be
+    recorded verbatim rather than recomputed."""
+    game = make_game()
+    move_info = game.describe_move("e2e4")
+
+    game.apply_move("e2e4", move_info=move_info, cp_loss=42, new_score=123)
+
+    assert game.recent_position_score == 123
+    assert game.cp_losses["white"] == [42]
+    assert game.move_log[-1]["san"] == "e4"
+
+
+### history accessors
+
+def test_history_streaks_and_averages(make_game):
+    game = make_game()
+    # Hand-build a log rather than playing 6 moves through Stockfish.
+    game.move_log = [
+        {"uci": "e2e4", "san": "e4", "turn": "white", "capture": False, "cp_loss": 10},
+        {"uci": "d7d5", "san": "d5", "turn": "black", "capture": False, "cp_loss": 20},
+        {"uci": "e4d5", "san": "exd5", "turn": "white", "capture": True, "cp_loss": 0},
+        {"uci": "d8d5", "san": "Qxd5", "turn": "black", "capture": True, "cp_loss": 300},
+    ]
+    game.cp_losses = {"white": [10, 0], "black": [20, 300]}
+
+    assert game.capture_streak() == 2
+    assert game.quiet_streak() == 0
+    assert game.recent_moves(3) == ["d7d5", "e4d5", "d8d5"]
+    assert game.average_cp_loss() == {"white": 5.0, "black": 160.0}
+    assert game.last_cp_losses(1) == {"white": [0], "black": [300]}
+
+
+def test_quiet_streak_is_the_other_side_of_the_coin(make_game):
+    game = make_game()
+    game.move_log = [
+        {"uci": "e4d5", "san": "exd5", "turn": "white", "capture": True, "cp_loss": 0},
+        {"uci": "g8f6", "san": "Nf6", "turn": "black", "capture": False, "cp_loss": 5},
+        {"uci": "b1c3", "san": "Nc3", "turn": "white", "capture": False, "cp_loss": 5},
+    ]
+    assert game.quiet_streak() == 2
+    assert game.capture_streak() == 0
+
+
+def test_history_snapshot_of_a_fresh_game(make_game):
+    game = make_game()
+    snapshot = game.history_snapshot()
+    assert snapshot["recent_moves"] == []
+    assert snapshot["capture_streak"] == 0
+    assert snapshot["quiet_streak"] == 0
+    assert snapshot["average_cp_loss"] == {"white": 0.0, "black": 0.0}
+    assert snapshot["last_cp_losses"] == {"white": [], "black": []}

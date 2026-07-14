@@ -33,7 +33,7 @@ def main(mini) -> None:
         if config.get("input", {"source": "robot"}).get("source", "robot") == "robot" 
         else InputDetector(input_type="keyboard", target_key=None)
     )
-    speaker = Speaker(mini)
+    speaker = Speaker(mini, config)
     game = ChessGame()
 
     # Keep the head in a rigid, non-drifting hold for the whole game so every board image is
@@ -69,27 +69,39 @@ def main(mini) -> None:
 
 
         move_estimate_accepted = False
-        for move in move_estimates:
-            speaker.suggest_move(move["move"])
-            speaker.pregenerate_comment(move, i)
-            move_estimate_rejected = input_detector.detect_input(type="move_estimate_rejected", alloted_time=config.get("review_time", 3))
+        accepted = None
+        for candidate in move_estimates:
+            # Submit BEFORE speaking, not after. Non-blocking (returns in ~1ms), so the
+            # worker gets to rate the candidate, write its comment and synthesize the
+            # waveform across both the suggestion playback below AND the review window --
+            # roughly 2.5s of extra runway for free. Kokoro synthesis is the slow stage
+            # (~0.6x realtime) and needs every bit of it.
+            speaker.pregenerate_comment(candidate, i, game)
+            speaker.suggest_move(candidate["move"])
+            move_estimate_rejected = input_detector.detect_input(type="move_estimate_rejected", alloted_time=config.get("review_time", 4))
             move_estimate_accepted = not move_estimate_rejected
             if move_estimate_accepted:
+                accepted = candidate
                 break
-        
-        move = move["move"]
-        move_info = move["move_info"]
+
         assert move_estimate_accepted # Assert we didn't loop through all moves without accepting any.
+        move = accepted["move"]
+        move_info = accepted["move_info"]
         print(f"move estimate accepted: {move}")
-        game.apply_move(move)
-        move_cp_loss = game.rate_move(move, move_info)
-        speaker.comment_on_move(move, move_info, move_cp_loss)
+
+        # Speak first: the comment carries the centipawn rating of the move, which the
+        # worker already computed, so apply_move can reuse it instead of re-running Stockfish.
+        move_cp_loss, new_score = speaker.comment_on_move(move, move_info, game)
+        game.apply_move(move, move_info=move_info, cp_loss=move_cp_loss, new_score=new_score)
 
         game_over = game.board.is_game_over() # checkmate, stalemate, or any draw condition
         if game.board.is_checkmate():
             speaker.exclaim_win(game)
 
         input_detector.switch_turn()
+
+    speaker.shutdown()
+    game.close()
 
 if __name__ == "__main__":
     with ReachyMini(media_backend="default") as mini:

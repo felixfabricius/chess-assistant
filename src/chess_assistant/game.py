@@ -1,3 +1,5 @@
+import threading
+
 import chess
 import chess.engine
 import torch
@@ -28,13 +30,22 @@ class ChessGame:
         self.engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
         self.depth = depth
             # maybe increase to 18 eventually
+        # Speaker's background thread calls cp_loss_for() while the main thread may still be
+        # inside estimate_move(). One Stockfish process, so serialise access to it.
+        self.engine_lock = threading.Lock()
         self.recent_position_score = self.eval_position()
+
+        # Game history, appended to by apply_move(). Feeds the commentary prompt.
+        self.move_log = []  # one dict per played move: uci, san, turn, capture, cp_loss
+        self.cp_losses = {"white": [], "black": []}
 
     def fen(self):
         return self.board.fen()
 
-    def eval_position(self):
-        info = self.engine.analyse(self.board, chess.engine.Limit(depth=self.depth))
+    def eval_position(self, board=None):
+        board = self.board if board is None else board
+        with self.engine_lock:
+            info = self.engine.analyse(board, chess.engine.Limit(depth=self.depth))
         score = info["score"].white().score(mate_score=10000)
         return score  # centipawns, from White's perspective
 
@@ -98,23 +109,14 @@ class ChessGame:
 
         scored_moves = []
         for move in self.board.legal_moves:
-            move_info = {
-                moved_piece: ,
-                turn: ,
-                capture: ,
-                captured_piece: ,
-                castle: ,
-                en_passant: ,
-                check: ,
-                checkmate: ,
-            }
-
             # Score the move
             loss_increment = 0
 
             before = self.board.copy()
             after = self.board.copy()
             after.push(move)
+
+            move_info = self.describe_move(move, after=after)
 
             changed_squares = []
 
@@ -175,43 +177,167 @@ class ChessGame:
                     loss_increment += self.loss_fn(square_pred_tensor, torch.tensor(TARGET_MAP[new_piece]))
                     loss_increment -= self.loss_fn(square_pred_tensor, torch.tensor(TARGET_MAP[old_piece]))
 
-            scored_moves.append({"move": move.uci(), "loss": initial_loss + loss_increment})            # Computation of initial loss is not necessary; it does not affect ranking.
+            scored_moves.append({
+                "move": move.uci(),
+                "loss": initial_loss + loss_increment,
+                "move_info": move_info,
+            })
+            # Computation of initial loss is not necessary; it does not affect ranking.
             # Keeping it as an evaluation metric for now.
-        
+
         # Sort candiate moves by likelihood (descending), which means
         # sort in ascending order by error impact of candidate moves
         scored_moves.sort(key = lambda x: x["loss"])
         return scored_moves
 
-    def rate_move(self, move_uci):
-        # Assume that move has just been pushed
-        new_position_score = self.eval_position()
-        if self.board.turn == chess.WHITE:
-            move_cp_loss = self.recent_position_score - new_position_score
+    def describe_move(self, move, after=None):
+        """Everything a commentator would want to know about `move`, read off the
+        *pre-move* board. Nothing here mutates state, so a candidate move can be
+        described without ever being played.
+
+        `after` is the board with `move` already pushed. estimate_move() builds one
+        anyway, so it passes it in; otherwise we make our own.
+        """
+        if isinstance(move, str):
+            move = chess.Move.from_uci(move)
+        board = self.board
+        if after is None:
+            after = board.copy()
+            after.push(move)
+
+        piece = board.piece_at(move.from_square)
+        assert piece is not None  # otherwise the move could not have been legal
+
+        en_passant = board.is_en_passant(move)
+        if en_passant:
+            # The captured pawn does not stand on the destination square, so
+            # piece_at(to_square) is None here. It is always a pawn.
+            captured_piece = "Pawn"
         else:
-            move_cp_loss = new_position_score - self.recent_position_score
-        self.recent_position_score = new_position_score
-        return max(0, move_cp_loss) # negative would mean the move beat the best line -> clamp to zero 
+            captured = board.piece_at(move.to_square)
+            captured_piece = _piece_name(captured.piece_type) if captured else None
 
+        if board.is_castling(move):
+            castle = "kingside" if board.is_kingside_castling(move) else "queenside"
+        else:
+            castle = None
 
-    def identify_moved_piece(self, move_uci: str):
-        move = chess.Move.from_uci(move_uci)
-        square = move.from_square
-        piece = self.board.piece_at(square)
-        assert piece is not None # otherwise move cannot have been legal
-        piece_name = chess.piece_name(piece.piece_type).capitalize()
-        return piece_name
+        return {
+            "move": move.uci(),
+            "san": board.san(move),
+            "moved_piece": _piece_name(piece.piece_type),
+            "turn": "white" if board.turn == chess.WHITE else "black",
+            "move_number": board.fullmove_number,
+            "capture": board.is_capture(move),
+            "captured_piece": captured_piece,
+            "castle": castle,
+            "en_passant": en_passant,
+            "promotion": _piece_name(move.promotion) if move.promotion else None,
+            "check": board.gives_check(move),
+            "checkmate": after.is_checkmate(),
+        }
 
-    def apply_move(self, move_uci):
+    def evaluate_after(self, move):
+        """White-perspective centipawn score of the position `move` would lead to.
+        Does not touch self.board, so it is safe to call from a worker thread on a
+        move that has not been (and may never be) played."""
+        if isinstance(move, str):
+            move = chess.Move.from_uci(move)
+        board = self.board.copy()
+        board.push(move)
+        return self.eval_position(board)
+
+    def cp_loss_for(self, move):
+        """How much `move` costs the side playing it, in centipawns. Returns
+        (cp_loss, new_score) so the caller can reuse the evaluation when it commits
+        the move instead of paying for a second engine analysis.
+
+        The mover's colour is read off the board *before* any push. Doing this after
+        pushing would read the opponent's colour and invert the sign, which is what
+        the old rate_move() did.
+        """
+        new_score = self.evaluate_after(move)
+        if self.board.turn == chess.WHITE:
+            cp_loss = self.recent_position_score - new_score
+        else:
+            cp_loss = new_score - self.recent_position_score
+        # A negative loss would mean the move beat the engine's own best line -> clamp.
+        return max(0, cp_loss), new_score
+
+    def apply_move(self, move_uci, move_info=None, cp_loss=None, new_score=None):
         move = chess.Move.from_uci(move_uci)
 
         if move not in self.board.legal_moves:
             raise ValueError(f"Illegal move: {move_uci}")
-    
+
+        if move_info is None:
+            move_info = self.describe_move(move)
+        if cp_loss is None or new_score is None:
+            cp_loss, new_score = self.cp_loss_for(move)
+
         self.board.push(move)
+        self.recent_position_score = new_score
+
+        self.move_log.append({
+            "uci": move_info["move"],
+            "san": move_info["san"],
+            "turn": move_info["turn"],
+            "capture": move_info["capture"],
+            "cp_loss": cp_loss,
+        })
+        self.cp_losses[move_info["turn"]].append(cp_loss)
+
+    # --- history, as consumed by the commentary prompt ---
+
+    def recent_moves(self, n=6):
+        return [entry["uci"] for entry in self.move_log[-n:]]
+
+    def capture_streak(self):
+        """How many moves in a row, ending at the last one played, were captures."""
+        return _trailing_streak(self.move_log, capture=True)
+
+    def quiet_streak(self):
+        """How many moves in a row, ending at the last one played, were not captures."""
+        return _trailing_streak(self.move_log, capture=False)
+
+    def average_cp_loss(self):
+        return {
+            side: (sum(losses) / len(losses)) if losses else 0.0
+            for side, losses in self.cp_losses.items()
+        }
+
+    def last_cp_losses(self, n=5):
+        return {side: losses[-n:] for side, losses in self.cp_losses.items()}
+
+    def history_snapshot(self, recent_moves=6, recent_cp_losses=5):
+        """A self-contained copy of the game history, safe to hand to a worker thread
+        (the main thread keeps mutating move_log/cp_losses as the game goes on)."""
+        return {
+            "recent_moves": self.recent_moves(recent_moves),
+            "capture_streak": self.capture_streak(),
+            "quiet_streak": self.quiet_streak(),
+            "average_cp_loss": self.average_cp_loss(),
+            "last_cp_losses": self.last_cp_losses(recent_cp_losses),
+        }
 
     def print_board(self):
         print(self.board)
+
+    def close(self):
+        self.engine.quit()
+
+
+def _piece_name(piece_type):
+    return chess.piece_name(piece_type).capitalize()
+
+
+def _trailing_streak(move_log, capture):
+    streak = 0
+    for entry in reversed(move_log):
+        if entry["capture"] != capture:
+            break
+        streak += 1
+    return streak
 
 
 if __name__ == "__main__":
