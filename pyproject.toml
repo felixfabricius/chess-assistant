@@ -3,7 +3,14 @@ name = "chess-assistant"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
+authors = [{ name = "Felix Fabricius" }]
 requires-python = ">=3.12"
+# GPL-3.0-or-later is required, not chosen: python-chess is GPL-3.0-or-later and
+# chess.Board.legal_moves is load-bearing for the move-ranking core. See README.
+# The bundled model weights under weights/ are Apache-2.0 and are not part of this
+# distribution; see weights/README.md.
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 dependencies = [
     "anthropic>=0.109.1",
     "hydra-core>=1.3.4",
