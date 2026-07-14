@@ -169,25 +169,28 @@ def evaluate(model, dataloader, loss_fns, loss_weights, split, csv_path, device)
         )
         board_estimator.estimate_board(squares_dir)
 
-        game = ChessGame(fen=board_position_data["previous_board_fen"], model_type="CNN")
-        assert game.board.is_valid() # should not arrive at an invalid position this way
-        estimated_moves = game.estimate_move(board_estimator.board_estimate)
+        # estimate_move() ranks legal moves against the board estimate and never consults
+        # Stockfish, so no engine is spawned here. The with-block is the guarantee that stays
+        # true: if anything below ever does reach for the engine, its process is still reaped.
+        with ChessGame(fen=board_position_data["previous_board_fen"], model_type="CNN") as game:
+            assert game.board.is_valid() # should not arrive at an invalid position this way
+            estimated_moves = game.estimate_move(board_estimator.board_estimate)
 
-        if len(estimated_moves) == 0:
-            continue
-
-        # This returns list of moves
-        if estimated_moves[0]["move"] == board_position_data["move_uci"]:
-            correct_moves += 1
-
-        for i, scored_move in enumerate(estimated_moves):
-            if scored_move["move"] == board_position_data["move_uci"]:
-                correct_move_normalised_rank.append(1 - i / len(estimated_moves))
-                # TODO: should not divide by len(estimated_moves) - 1; should be
-                # len(estimated_moves)
+            if len(estimated_moves) == 0:
                 continue
 
-        n_valid += 1
+            # This returns list of moves
+            if estimated_moves[0]["move"] == board_position_data["move_uci"]:
+                correct_moves += 1
+
+            for i, scored_move in enumerate(estimated_moves):
+                if scored_move["move"] == board_position_data["move_uci"]:
+                    correct_move_normalised_rank.append(1 - i / len(estimated_moves))
+                    # TODO: should not divide by len(estimated_moves) - 1; should be
+                    # len(estimated_moves)
+                    continue
+
+            n_valid += 1
 
     metrics = {
         "eval/square/n": n,

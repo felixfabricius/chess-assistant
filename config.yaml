@@ -29,6 +29,13 @@ vision:
   model_version: claude-opus-4-8
   prompt_version: 1
   
+engine:
+  # Path to a Stockfish binary. null -> $STOCKFISH_PATH, then whatever is on PATH.
+  # Only needed for move rating and commentary; reading the board and ranking candidate
+  # moves never starts an engine.
+  stockfish_path: null
+  depth: 16
+
 input:
   source: keyboard # alternative: robot
 

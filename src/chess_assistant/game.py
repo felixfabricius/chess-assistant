@@ -1,4 +1,7 @@
+import os
+import shutil
 import threading
+from pathlib import Path
 
 import chess
 import chess.engine
@@ -8,7 +11,56 @@ from torch import nn
 from chess_assistant.config import SQUARES, PIECES
 from chess_assistant.model.config import TARGET_MAP, INVERSE_TARGET_MAP
 
-STOCKFISH_PATH = r"C:\Users\User\AppData\Local\Microsoft\WinGet\Packages\Stockfish.Stockfish_Microsoft.Winget.Source_8wekyb3d8bbwe\stockfish\stockfish-windows-x86-64-avx2.exe"
+
+def _is_executable(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    if os.name == "nt":
+        # X_OK is meaningless on Windows (it returns True for any readable file), so go by
+        # extension instead -- otherwise a stray stockfish.txt on PATH would be "found".
+        return path.suffix.lower() in {".exe", ".com", ".bat", ".cmd"}
+    return os.access(path, os.X_OK)
+
+
+def resolve_stockfish_path(explicit: str | None = None) -> str:
+    """Locate a Stockfish binary: explicit argument, then $STOCKFISH_PATH, then $PATH.
+
+    A path that was named explicitly but does not exist is an error rather than a reason
+    to fall through -- that is a typo in the config, and silently analysing with some
+    other binary found on PATH would hide it.
+    """
+    for candidate in (explicit, os.environ.get("STOCKFISH_PATH")):
+        if candidate:
+            if Path(candidate).is_file():
+                return str(candidate)
+            raise FileNotFoundError(f"No Stockfish binary at {str(candidate)!r}.")
+
+    found = shutil.which("stockfish")
+    if found:
+        return found
+
+    # winget installs the binary under an arch-tagged name (stockfish-windows-x86-64-avx2.exe)
+    # and creates no `stockfish` shim, so which() misses it even though its directory is on
+    # PATH. Sweep PATH for anything that looks like a Stockfish executable before giving up.
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        try:
+            matches = sorted(Path(entry).glob("stockfish*"))
+        except OSError:  # unreadable or malformed PATH entry
+            continue
+        for match in matches:
+            if _is_executable(match):
+                return str(match)
+
+    raise FileNotFoundError(
+        "Stockfish not found. Install it and put it on PATH, set STOCKFISH_PATH, or set "
+        "engine.stockfish_path in config.yaml.\n"
+        "  Windows:  winget install Stockfish.Stockfish\n"
+        "  macOS:    brew install stockfish\n"
+        "  Linux:    apt install stockfish"
+    )
+
 
 class ChessGame:
     """
@@ -18,26 +70,61 @@ class ChessGame:
     Perhaps also keep track of multiple moves. 
     (Easier to debug: if it's not a specific move that I think it is, can try a new one.)
     """
-    def __init__(self, fen: str | None = None, model_type: str = "LLM", depth=16):
+    def __init__(
+        self,
+        fen: str | None = None,
+        model_type: str = "LLM",
+        depth=16,
+        stockfish_path: str | None = None,
+    ):
         fen = fen if fen is not None else "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-        self.board = chess.Board(fen=fen) 
-            # allow for passing of FEN to simulate continuation of game from an 
+        self.board = chess.Board(fen=fen)
+            # allow for passing of FEN to simulate continuation of game from an
             # arbitrary prior position during evaluation
         assert model_type in ["LLM", "CNN"]
         self.model_type = model_type
         if self.model_type == "CNN":
             self.loss_fn = nn.CrossEntropyLoss()
-        self.engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
         self.depth = depth
             # maybe increase to 18 eventually
+        # Stockfish is spawned on first use, not here -- see the engine property. estimate_move()
+        # never touches it, so board reading and move ranking run with no engine installed at all.
+        self._stockfish_path = stockfish_path
+        self._engine = None
+        self._recent_position_score = None
         # Speaker's background thread calls cp_loss_for() while the main thread may still be
         # inside estimate_move(). One Stockfish process, so serialise access to it.
         self.engine_lock = threading.Lock()
-        self.recent_position_score = self.eval_position()
 
         # Game history, appended to by apply_move(). Feeds the commentary prompt.
         self.move_log = []  # one dict per played move: uci, san, turn, capture, cp_loss
         self.cp_losses = {"white": [], "black": []}
+
+    @property
+    def engine(self):
+        """The Stockfish process, launched on first read.
+
+        Every read goes through eval_position(), which holds engine_lock, so two threads
+        racing to be the first user cannot spawn two processes.
+        """
+        if self._engine is None:
+            self._engine = chess.engine.SimpleEngine.popen_uci(
+                resolve_stockfish_path(self._stockfish_path)
+            )
+        return self._engine
+
+    @property
+    def recent_position_score(self):
+        """Engine score of the current position. Evaluated on first read rather than in
+        __init__, which used to spend a depth-16 search on every ChessGame ever built --
+        including the ones that only rank moves and never ask for a score."""
+        if self._recent_position_score is None:
+            self._recent_position_score = self.eval_position()
+        return self._recent_position_score
+
+    @recent_position_score.setter
+    def recent_position_score(self, value):
+        self._recent_position_score = value
 
     def fen(self):
         return self.board.fen()
@@ -324,7 +411,19 @@ class ChessGame:
         print(self.board)
 
     def close(self):
-        self.engine.quit()
+        # self._engine, not self.engine: reading the property would spawn a Stockfish process
+        # purely in order to quit it. Idempotent, so an explicit close() inside a with-block
+        # (or a second call) is harmless.
+        if self._engine is not None:
+            self._engine.quit()
+            self._engine = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
 
 
 def _piece_name(piece_type):

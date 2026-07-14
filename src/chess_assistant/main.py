@@ -34,7 +34,11 @@ def main(mini) -> None:
         else InputDetector(input_type="keyboard", target_key=None)
     )
     speaker = Speaker(mini, config)
-    game = ChessGame()
+    engine_config = config.get("engine", {})
+    game = ChessGame(
+        stockfish_path=engine_config.get("stockfish_path"),
+        depth=engine_config.get("depth", 16),
+    )
 
     # Keep the head in a rigid, non-drifting hold for the whole game so every board image is
     # captured from the calibrated pose (see make_head_rigid). Re-asserted here in case setup
