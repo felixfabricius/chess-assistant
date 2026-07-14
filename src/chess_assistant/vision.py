@@ -282,32 +282,3 @@ class BoardEstimator:
 
         return self.board_estimate
 
-
-if __name__ == "__main__":
-    """
-    Pass:
-    1. squares_dir; example: data/raw_images/squares
-    2. config_path: config.yaml
-    3. squares separated by spaces, e.g. a1 a2 h8
-
-    Example:
-    uv run python -m chess_assistant.vision data/raw_images/squares config.yaml a1 d4 d5 a8 h8
-    """
-    import sys
-    assert len(sys.argv) > 2
-    
-    squares_dir = Path(sys.argv[1])
-
-    config = OmegaConf.load(sys.argv[2])
-
-    SQUARES = [square for square in sys.argv[3:]]
-    print(SQUARES)
-    BoardEstimate = make_dataclass(
-        "BoardEstimate",
-        [(square, SquareEstimate | None, None) for square in SQUARES]
-    )
-    board_estimator = BoardEstimator(config)
-    print(board_estimator)
-    
-    board_estimate = board_estimator.classify_board(squares_dir)
-    print(board_estimate)
