@@ -27,7 +27,7 @@ def main(mini) -> None:
     # camera feed so you can watch whether the camera has moved away from the calibrated pose.
     launch_calibration_monitor(calibration_metadata_path)
     image_processor = Processor(calibration_metadata_path, "config.yaml")
-    board_estimator = BoardEstimator("CNN", config, calibration_metadata_path, model_path=config.vision.model_path, device="cpu")
+    board_estimator = BoardEstimator("CNN", config, calibration_metadata_path, model_weights_path=Path(config.vision.model_weights_path), device="cpu")
     input_detector = (
         InputDetector(input_type="robot", mini=mini, calibration_metadata_path=calibration_metadata_path) 
         if config.get("input", {"source": "robot"}).get("source", "robot") == "robot" 

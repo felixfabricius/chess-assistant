@@ -1,6 +1,7 @@
 from chess_assistant.vision import SquareEstimate, BoardEstimate, BoardEstimator
-from chess_assistant.model.model import SquareClassifier, SquareClassifierMultiHead
+from chess_assistant.model.model import SquareClassifierMultiHead
 from chess_assistant.model.config import TARGET_MAP
+from omegaconf import OmegaConf
 from pathlib import Path
 
 import math
@@ -10,14 +11,16 @@ import pytest
 CALIBRATION_METADATA_PATH = Path("data/generated/2026-07-01_175334/calibration_metadata.json")
 SQUARE_IMAGE_PATH = Path("data/generated/2026-07-01_175334/board_2026-07-01_175602/squares/a1/a1.png")
 SQUARES_DIR = SQUARE_IMAGE_PATH.parent.parent
+CONFIG_PATH = Path("config.yaml")
 
-### Test that estimate_square and estimate_board work and return a valid board
-@pytest.fixture
-def board_estimator(scope="module"):
+
+### Structural tests: an untrained multi-head model is enough to exercise the plumbing.
+@pytest.fixture(scope="module")
+def board_estimator():
     return BoardEstimator(
-        model_type="CNN", 
+        model_type="CNN",
         calibration_metadata_path=CALIBRATION_METADATA_PATH,
-        model=SquareClassifier()
+        model=SquareClassifierMultiHead(),
     )
 
 def test_estimate_square(board_estimator):
@@ -30,25 +33,61 @@ def test_estimate_board(board_estimator):
     assert isinstance(board_estimate.a1, SquareEstimate)
     assert isinstance(board_estimate, BoardEstimate)
 
-
-### The same, but with the multi-head model (model 3) through BoardEstimator
-@pytest.fixture
-def multihead_board_estimator(scope="module"):
-    model = SquareClassifierMultiHead()
-    # eval() so BatchNorm uses running stats (inference-appropriate); metadata is now a
-    # plain one-hot with no BatchNorm, but the conv trunk still has BatchNorm2d.
-    model.eval()
-    return BoardEstimator(
-        model_type="CNN",
-        calibration_metadata_path=CALIBRATION_METADATA_PATH,
-        model=model
-    )
-
-def test_estimate_square_multihead(multihead_board_estimator):
-    square_estimate = multihead_board_estimator.estimate_square(SQUARE_IMAGE_PATH)
-    assert isinstance(square_estimate, SquareEstimate)
+def test_estimate_square_returns_valid_logprobs(board_estimator):
+    square_estimate = board_estimator.estimate_square(SQUARE_IMAGE_PATH)
     # The 13 stored values are reconstructed log-probabilities; exp() forms a valid
-    # distribution and softmax over them (as stated in the task) sums to ~1.
+    # distribution and softmax over them (as game.py re-applies) sums to ~1.
     values = torch.tensor([getattr(square_estimate, label) for label in TARGET_MAP])
     assert math.isclose(values.exp().sum().item(), 1.0, abs_tol=1e-4)
     assert math.isclose(torch.softmax(values, dim=-1).sum().item(), 1.0, abs_tol=1e-6)
+
+
+### The production path: construct exactly as main.py does, from config.yaml.
+### Pins the safetensors import, the config key, the kwarg name, and that the shipped
+### weights still match the architecture. Any of those breaking is a crash on launch.
+@pytest.fixture(scope="module")
+def trained_board_estimator():
+    config = OmegaConf.load(CONFIG_PATH)
+    return BoardEstimator(
+        "CNN",
+        config,
+        calibration_metadata_path=CALIBRATION_METADATA_PATH,
+        model_weights_path=Path(config.vision.model_weights_path),
+        device="cpu",
+    )
+
+def test_loads_shipped_weights_from_config(trained_board_estimator):
+    assert isinstance(trained_board_estimator.model, SquareClassifierMultiHead)
+
+def test_model_is_in_eval_mode(trained_board_estimator):
+    # In train mode BatchNorm normalises each crop by its own batch-of-one statistics rather
+    # than the running stats learned during training, which costs ~8-10pp of square accuracy.
+    assert trained_board_estimator.model.training is False
+
+def test_inference_does_not_mutate_batchnorm_running_stats(trained_board_estimator):
+    # The behavioural signature of a train-mode model: every forward pass nudges
+    # running_mean/running_var, so the loaded checkpoint's stats drift away from the trained
+    # ones as a game is played. Checking the .training flag alone would not catch a model
+    # that is re-entered into train mode further downstream.
+    batchnorms = [
+        module for module in trained_board_estimator.model.modules()
+        if isinstance(module, torch.nn.BatchNorm2d)
+    ]
+    assert batchnorms, "model has no BatchNorm2d; this test is guarding nothing"
+    before = [(bn.running_mean.clone(), bn.running_var.clone()) for bn in batchnorms]
+
+    trained_board_estimator.estimate_square(SQUARE_IMAGE_PATH)
+
+    for bn, (running_mean, running_var) in zip(batchnorms, before):
+        assert torch.equal(bn.running_mean, running_mean)
+        assert torch.equal(bn.running_var, running_var)
+
+def test_inference_is_deterministic(trained_board_estimator):
+    # Guards the inference transform: TRAIN_TRANSFORM carries ColorJitter / GaussianNoise /
+    # RandomAffine, so wiring it in here instead of EVAL_TRANSFORM would make the robot read a
+    # different board from the same photo. (Note this does *not* guard eval mode -- a
+    # train-mode BatchNorm is still deterministic for a fixed input.)
+    first = trained_board_estimator.estimate_square(SQUARE_IMAGE_PATH)
+    second = trained_board_estimator.estimate_square(SQUARE_IMAGE_PATH)
+    for label in TARGET_MAP:
+        assert getattr(first, label) == getattr(second, label)

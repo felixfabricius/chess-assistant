@@ -11,7 +11,7 @@ from dataclasses import dataclass, make_dataclass
 import anthropic
 import torch
 from torchvision import tv_tensors
-from torchvision.transforms import v2
+from safetensors.torch import load_file
 
 import numpy as np
 
@@ -19,7 +19,7 @@ import numpy as np
 from omegaconf import OmegaConf, DictConfig
 
 from chess_assistant.config import SQUARES
-from chess_assistant.model.config import INVERSE_TARGET_MAP, TARGET_MAP, reconstruct_13way_logprobs, TOP_LEFT_OHE_MAP
+from chess_assistant.model.config import TARGET_MAP, reconstruct_13way_logprobs, TOP_LEFT_OHE_MAP
 from chess_assistant.model.data import EVAL_TRANSFORM
 from chess_assistant.model.model import SquareClassifierMultiHead
 
@@ -111,7 +111,7 @@ def infer_fen_from_image(image_path: Path, model: str = "claude-opus-4-8", promp
     return message.content[0].text
 
 class BoardEstimator:
-    def __init__(self, model_type: str = "CNN", config: DictConfig | None = None, calibration_metadata_path: Path | None = None, model_path = None, device = None, model = None):
+    def __init__(self, model_type: str = "CNN", config: DictConfig | None = None, calibration_metadata_path: Path | None = None, model_weights_path = None, device = None, model = None):
         """
         Keep track of:
         - recent board estimate
@@ -136,10 +136,10 @@ class BoardEstimator:
             self.client = anthropic.Anthropic()
         else:
             assert calibration_metadata_path is not None
-            assert model_path is not None or model is not None
+            assert model_weights_path is not None or model is not None
             if model is None:
                 model = SquareClassifierMultiHead()
-                state_dict = torch.load(model_path, map_location="cpu")["model_state_dict"]
+                state_dict = load_file(model_weights_path, device="cpu")
                 model.load_state_dict(state_dict)
             assert device in ["cpu", "cuda", None, torch.device("cpu"), torch.device("cuda")]
             self.device = torch.device(device) if device is not None else torch.device("cpu")
@@ -147,6 +147,7 @@ class BoardEstimator:
                 calibration_metadata = json.load(f)
             # The model's only metadata: which board corner is top-left in the image.
             self.top_left_corner = calibration_metadata["camera_natural_orientation"]["order"]["tl"]
+            model.eval()
             self.model = model.to(self.device)
         self.model_type = model_type
 
@@ -174,7 +175,6 @@ class BoardEstimator:
                     }
                 ]
             )
-            breakpoint()
             square_estimate = SquareEstimate(
                 image_path=image_path,
                 copied=False,
@@ -219,24 +219,17 @@ class BoardEstimator:
                 copied_from=None
             )
 
-            if hasattr(self.model, "empty_head"):
-                # Multi-head model (model 3): recombine the three heads into 13-way
-                # log-probabilities. softmax(log p) == p and the reconstructed probs sum to
-                # 1, so log p is a drop-in for the old single-head logits under the softmax
-                # game.py re-applies downstream.
+            # Multi-head model (model 3): recombine the three heads into 13-way
+            # log-probabilities. softmax(log p) == p and the reconstructed probs sum to
+            # 1, so log p is a drop-in for the old single-head logits under the softmax
+            # game.py re-applies downstream.
+            with torch.no_grad():
                 logit_empty, logits_color, logits_type = self.model(image, metadata)
-                logprobs = reconstruct_13way_logprobs(
-                    logit_empty.squeeze(0), logits_color.squeeze(0), logits_type.squeeze(0)
-                )
-                for label, idx in TARGET_MAP.items():
-                    setattr(square_estimate, label, logprobs[idx].item())
-            else:
-                logits = self.model(image, metadata).squeeze()
-                # Shape of the non-squeezed logits would be (1, 13)
-                for label in INVERSE_TARGET_MAP.keys():
-                    # label takes values in 0, ..., 12
-                    setattr(square_estimate, INVERSE_TARGET_MAP[label], logits[label].item())
-
+            logprobs = reconstruct_13way_logprobs(
+                logit_empty.squeeze(0), logits_color.squeeze(0), logits_type.squeeze(0)
+            )
+            for label, idx in TARGET_MAP.items():
+                setattr(square_estimate, label, logprobs[idx].item())
             return square_estimate
 
     def estimate_board(self, squares_dir):
@@ -267,8 +260,6 @@ class BoardEstimator:
                 condition in the if-statement.)
                 When fixing, carefully note that getattr and setattr apparently do not support
                 nested attribute access.
-
-                To search for such patterns: getattr\([^)\n]*\.
                 """
                 square_estimate = getattr(self.recent_board, square)
                 setattr(

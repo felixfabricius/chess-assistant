@@ -346,4 +346,3 @@ if __name__ == "__main__":
     for move in game.board.legal_moves: 
         print(move)
     print(type(next(iter(game.board.legal_moves)).uci()))
-    breakpoint()
