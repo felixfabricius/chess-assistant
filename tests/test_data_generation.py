@@ -85,9 +85,10 @@ def test_build_square_rows_shape_and_labels(tmp_path):
     by_square = {row["square"]: row for row in rows}
     assert by_square["e1"]["label"] == "K"
     assert by_square["e4"]["label"] == "empty"
-    assert by_square["e1"]["square_image_path"] == str(
+    # Paths are serialised POSIX-style (.as_posix()) so the CSV is portable across OSes.
+    assert by_square["e1"]["square_image_path"] == (
         squares_dir / "e1" / "e1_annotated.png"
-    )
+    ).as_posix()
     # None values are serialised as empty strings for the CSV.
     assert by_square["e1"]["previous_board_fen"] == ""
     assert by_square["e1"]["move_uci"] == ""
@@ -126,7 +127,8 @@ def test_create_setup_makes_dir_with_given_timestamp(tmp_path):
 
 
 def _session(tmp_path):
-    return DataGenerationSession(config_path="config.yaml", data_root=tmp_path)
+    # mini is stored but never touched by the non-hardware code paths these tests exercise.
+    return DataGenerationSession(object(), config_path="config.yaml", data_root=tmp_path)
 
 
 def test_legal_move_tracks_fens(tmp_path):
@@ -205,10 +207,18 @@ def test_new_game_resets_state(tmp_path):
 
 
 def _patch_hardware(monkeypatch):
-    """Stub out the robot-facing calibrate/Processor so setup logic is testable."""
-    import chess_assistant.data_generation as dg
+    """Stub out the robot-facing calibrate/Processor so setup logic is testable.
 
-    monkeypatch.setattr(dg, "calibrate", lambda *a, **k: {"stub": True})
+    calibrate is stubbed with create_autospec so that a mismatched call -- e.g. if its
+    signature drifts again -- fails loudly here rather than being silently swallowed by a
+    ``lambda *a, **k`` that accepts anything.
+    """
+    import chess_assistant.data_generation as dg
+    from unittest.mock import create_autospec
+
+    monkeypatch.setattr(
+        dg, "calibrate", create_autospec(dg.calibrate, return_value={"stub": True})
+    )
     monkeypatch.setattr(dg, "Processor", lambda *args, **kwargs: object())
 
 
@@ -266,9 +276,10 @@ def test_annotate_center_flag_passed_to_calibrate(tmp_path, monkeypatch):
     monkeypatch.setattr(dg, "Processor", lambda *a, **k: object())
 
     session = DataGenerationSession(
-        config_path="config.yaml", data_root=tmp_path, annotate_center=True
+        object(), config_path="config.yaml", data_root=tmp_path, annotate_center=True
     )
     assert session.start_new_setup() is True
-    # calibrate was called with annotate_center=True (3rd positional arg).
+    # calibrate is called as calibrate(mini, setup_dir, config_path, annotate_center),
+    # so annotate_center is now the 4th positional arg.
     args, _kwargs = calls[0]
-    assert args[2] is True
+    assert args[3] is True

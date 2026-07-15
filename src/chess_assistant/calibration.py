@@ -421,7 +421,7 @@ def build_calibration_metadata(
         },
     }
     if raw_image_path is not None:
-        metadata["raw_image_path"] = str(raw_image_path)
+        metadata["raw_image_path"] = Path(raw_image_path).as_posix()
     return metadata
 
 

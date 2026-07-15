@@ -71,6 +71,7 @@ import json
 import random
 from datetime import datetime
 from pathlib import Path
+from reachy_mini import ReachyMini
 
 import chess
 
@@ -198,9 +199,9 @@ def build_square_rows(
                 "image_id": image_id,
                 "square": square,
                 "label": piece_map[square],
-                "square_image_path": str(square_image_path(squares_dir, square)),
-                "full_image_path": str(full_image_path),
-                "calibration_metadata_path": str(calibration_metadata_path),
+                "square_image_path": square_image_path(squares_dir, square).as_posix(),
+                "full_image_path": Path(full_image_path).as_posix(),
+                "calibration_metadata_path": Path(calibration_metadata_path).as_posix(),
                 "valid_game_position": valid_game_position,
                 "board_fen": board_fen or "",
                 "previous_board_fen": previous_board_fen or "",
@@ -262,10 +263,12 @@ class DataGenerationSession:
 
     def __init__(
         self,
+        mini: ReachyMini,
         config_path: Path,
         data_root: Path = DATA_ROOT,
         annotate_center: bool = False,
     ) -> None:
+        self.mini = mini
         self.config_path = Path(config_path)
         self.data_root = Path(data_root)
         self.csv_path = self.data_root / CSV_NAME
@@ -304,7 +307,7 @@ class DataGenerationSession:
         """
         setup_id, setup_dir, setup_split = create_setup(self.data_root)
 
-        calibration_data = calibrate(setup_dir, self.config_path, self.annotate_center)
+        calibration_data = calibrate(self.mini, setup_dir, self.config_path, self.annotate_center)
         if not calibration_data:
             print("Calibration was aborted or failed. Setup not created.")
             return False
@@ -327,8 +330,8 @@ class DataGenerationSession:
             {
                 "setup_id": setup_id,
                 "created_at": now_iso(),
-                "config_path": str(self.config_path),
-                "calibration_metadata_path": str(calibration_metadata_path),
+                "config_path": Path(self.config_path).as_posix(),
+                "calibration_metadata_path": Path(calibration_metadata_path).as_posix(),
             },
         )
 
@@ -453,7 +456,7 @@ class DataGenerationSession:
 
         # 1. Capture. capture_image() creates its own board_<timestamp> dir.
         try:
-            image_dir = capture_image(self.setup_dir)
+            image_dir = capture_image(self.mini, self.setup_dir)
         except Exception as exc:  # noqa: BLE001
             print(f"Image capture failed: {exc}")
             return False
@@ -516,10 +519,10 @@ class DataGenerationSession:
                 "previous_board_fen": self.previous_board_fen,
                 "move_uci": self.move_uci,
                 "piece_map": piece_map,
-                "full_image_path": str(full_image_path),
-                "warped_image_path": str(warped_image_path),
-                "squares_dir": str(squares_dir),
-                "calibration_metadata_path": str(self.calibration_metadata_path),
+                "full_image_path": Path(full_image_path).as_posix(),
+                "warped_image_path": Path(warped_image_path).as_posix(),
+                "squares_dir": Path(squares_dir).as_posix(),
+                "calibration_metadata_path": Path(self.calibration_metadata_path).as_posix(),
             },
         )
 
@@ -846,13 +849,15 @@ def generate_data(
     recalibration in this session: True clicks the extended centre point, False interpolates it
     from the corners.
     """
-    session = DataGenerationSession(
-        config_path=Path(config_path),
-        data_root=Path(data_root),
-        annotate_center=annotate_center,
-    )
-    ui = BoardUI(session)
-    ui.run()
+    with ReachyMini(media_backend="default") as mini:
+        session = DataGenerationSession(
+            mini,
+            config_path=Path(config_path),
+            data_root=Path(data_root),
+            annotate_center=annotate_center,
+        )
+        ui = BoardUI(session)
+        ui.run()
 
 
 if __name__ == "__main__":

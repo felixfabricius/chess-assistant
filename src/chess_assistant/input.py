@@ -45,17 +45,17 @@ class InputDetector:
 
     def __init__(
             self, 
-            input_type: str = "keyboard", 
+            input_source: str = "keyboard", 
             target_key: str | None = " ",
             mini: ReachyMini | None = None,
             calibration_metadata_path: Path | None = None,
             baseline_rotation: int | None = 85,
             max_time: float = 1 # max time in HOURS to wait for a 'necessary' event
         ):
-        assert input_type in ["keyboard", "robot"]
-        self.input_type = input_type
+        assert input_source in ["keyboard", "robot"]
+        self.input_source = input_source
         self.max_time = max_time
-        if input_type == "keyboard":
+        if input_source == "keyboard":
             self.target_key = target_key
             self.platform = sys.platform
 
@@ -92,10 +92,10 @@ class InputDetector:
             self.baseline_rotation = baseline_rotation
             mini.goto_target(antennas=np.deg2rad([-self.baseline_rotation, self.baseline_rotation]), duration=0.5)
 
-    def detect_input(self, type: str, alloted_time: float = 3, antenna_direction: str = "downwards") -> bool:
+    def detect_input(self, input_type: str, alloted_time: float = 3, antenna_direction: str = "downwards") -> bool:
         """Wait for an input and report whether one arrived.
 
-        ``type`` is one of:
+        ``input_type`` is one of:
 
         - ``"necessary"`` -- block until the input arrives (giving up only after ``max_time``
           hours). Used when the game cannot proceed without the players, e.g. waiting for them
@@ -108,78 +108,112 @@ class InputDetector:
         The two antenna gestures are deliberately opposite: push the antenna DOWN to confirm a
         move, and UP to reject the robot's suggestion.
         """
-        assert type in ["necessary", "optional", "move_made", "move_estimate_rejected"]
+        assert input_type in ["necessary", "optional", "move_made", "move_estimate_rejected"]
 
-        if type == "move_made":
-            type = "necessary"
+        if input_type == "move_made":
+            input_type = "necessary"
             antenna_direction = "downwards"
-        elif type == "move_estimate_rejected":
-            type = "optional"
+        elif input_type == "move_estimate_rejected":
+            input_type = "optional"
             antenna_direction = "upwards"
 
-        move_made = False
-        alloted_time = self.max_time * 3600 if type == "necessary" else alloted_time # max time is in hours
+        alloted_time = self.max_time * 3600 if input_type == "necessary" else alloted_time # max time is in hours
 
         end_time = time.time() + alloted_time
 
         # Drop any keystrokes buffered during a previous phase so a stale press can't be
         # misread as fresh input (e.g. auto-rejecting the first suggested move).
-        if self.input_type == "keyboard" and self.platform == "win32":
-            while msvcrt.kbhit():
-                msvcrt.getwch()
+        if self.input_source == "keyboard":
+            if self.platform == "win32":
+                while msvcrt.kbhit():
+                    msvcrt.getwch()
+            elif sys.stdin.isatty():
+                # POSIX equivalent of the drain above: discard the terminal's unread input queue.
+                termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
 
+        if self.input_source == "robot":
+            return self._detect_robot(end_time, antenna_direction)
+        return self._detect_keyboard(end_time)
+
+    def _detect_robot(self, end_time: float, antenna_direction: str) -> bool:
+        """Poll the active antenna until it travels past the threshold, or time runs out."""
+        assert antenna_direction in ["downwards", "upwards"]
+
+        move_made = False
         while time.time() < end_time and not move_made:
-            if self.input_type == "robot":
-                assert antenna_direction in ["downwards", "upwards"]
-                _, antenna_positions = self.mini.get_current_joint_positions()
-            
-                antenna_position = antenna_positions[SIDE_MAP[self.side_to_play]]
-                antenna_position = np.rad2deg(antenna_position)
+            _, antenna_positions = self.mini.get_current_joint_positions()
 
-                if antenna_direction == "downwards":
-                    # The two antennas rest at opposite baselines (+85 and -85), so "down" is a
-                    # different sign for each. For the left antenna it is a small anti-clockwise
-                    # rotation, i.e. degrees increasing past +baseline; for the right one it is
-                    # the mirror image, i.e. degrees dropping below -baseline. Hence the two
-                    # comparisons look different but mean the same gesture.
-                    if self.side_to_play == "left":
-                        move_made = antenna_position - self.baseline_rotation > THRESHOLD_DEGREES
-                    else:
-                        move_made = -self.baseline_rotation - antenna_position > THRESHOLD_DEGREES
-                else:
-                    # Same idea for "up", with both comparisons flipped.
-                    if self.side_to_play == "left":
-                        move_made = self.baseline_rotation - antenna_position > THRESHOLD_DEGREES
-                    else:
-                        move_made = antenna_position - -self.baseline_rotation > THRESHOLD_DEGREES
-        
-            else: # input_type is 'keyboard'
-                if self.platform == "win32":
-                    if msvcrt.kbhit():
-                        key = msvcrt.getwch()
-                        if self.target_key is None or key == self.target_key:
-                            move_made = True
-                else:
-                    fd = sys.stdin.fileno()
-                    old_settings = termios.tcgetattr(fd)
-                    try:
-                        tty.setcbreak(fd)
-                        remaining = end_time - time.time()
-                        rlist, _, _ = select.select([sys.stdin], [], [], remaining)
-                        if rlist:
-                            key = sys.stdin.read(1)
-                            if self.target_key is None or key == self.target_key:
-                                move_made = True
-                    finally:
-                        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            antenna_position = antenna_positions[SIDE_MAP[self.side_to_play]]
+            antenna_position = np.rad2deg(antenna_position)
 
-            time.sleep(0.02)  # avoid a tight busy-loop while polling for input
+            if antenna_direction == "downwards":
+                # The two antennas rest at opposite baselines (+85 and -85), so "down" is a
+                # different sign for each. For the left antenna it is a small anti-clockwise
+                # rotation, i.e. degrees increasing past +baseline; for the right one it is
+                # the mirror image, i.e. degrees dropping below -baseline. Hence the two
+                # comparisons look different but mean the same gesture.
+                if self.side_to_play == "left":
+                    move_made = antenna_position - self.baseline_rotation > THRESHOLD_DEGREES
+                else:
+                    move_made = -self.baseline_rotation - antenna_position > THRESHOLD_DEGREES
+            else:
+                # Same idea for "up", with both comparisons flipped.
+                if self.side_to_play == "left":
+                    move_made = self.baseline_rotation - antenna_position > THRESHOLD_DEGREES
+                else:
+                    move_made = antenna_position - -self.baseline_rotation > THRESHOLD_DEGREES
+
+            time.sleep(0.02)  # avoid a tight busy-loop while polling the joint positions
         return move_made
-        
+
+    def _detect_keyboard(self, end_time: float) -> bool:
+        """Wait for an accepted keypress until ``end_time``, or report that none arrived.
+
+        Two code paths because the two platforms read the keyboard differently:
+
+        - Windows: ``msvcrt.kbhit`` is a non-blocking peek, so we poll it in a loop with a short
+          sleep to avoid spinning.
+        - POSIX: ``select`` blocks until a key is ready or the deadline passes, so no polling
+          sleep is needed. The terminal is put into cbreak mode once here (not per iteration) so
+          single keypresses arrive without waiting for Enter, and restored on the way out.
+        """
+        if self.platform == "win32":
+            move_made = False
+            while time.time() < end_time and not move_made:
+                if msvcrt.kbhit():
+                    key = msvcrt.getwch()
+                    if self.target_key is None or key == self.target_key:
+                        move_made = True
+                time.sleep(0.02)  # kbhit is non-blocking, so avoid a tight busy-loop
+            return move_made
+
+        def poll() -> bool:
+            while time.time() < end_time:
+                remaining = end_time - time.time()
+                rlist, _, _ = select.select([sys.stdin], [], [], remaining)
+                if rlist:
+                    key = sys.stdin.read(1)
+                    if self.target_key is None or key == self.target_key:
+                        return True
+            return False
+
+        # Without an interactive terminal (e.g. piped stdin) we can't set cbreak mode; fall back
+        # to a plain blocking read so a headless run degrades gracefully instead of raising.
+        if not sys.stdin.isatty():
+            return poll()
+
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            return poll()
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
 
     def reset_positions(self):
         """Splay both antennas back out to the baseline, ready for the next press."""
-        if self.input_type == "robot":
+        if self.input_source == "robot":
             self.mini.goto_target(antennas=np.deg2rad([-self.baseline_rotation, self.baseline_rotation]), duration=0.5)
 
     def switch_turn(self):
@@ -187,7 +221,7 @@ class InputDetector:
 
         A no-op in keyboard mode, where both players share the same keyboard.
         """
-        if self.input_type == "robot":
+        if self.input_source == "robot":
             self.side_to_play = INVERSE_SIDE_MAP[1 - SIDE_MAP[self.side_to_play]]
 
 
