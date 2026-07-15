@@ -49,7 +49,7 @@ PITCH_STEP_DEG = 2
 
 # Where the head starts: the pose the board tends to frame up well from.
 OPT_HEIGHT_MM = 8
-OPT_PITCH_MM = 26
+OPT_PITCH_DEG = 26
 
 MOVE_DURATION = 0.25
 
@@ -139,6 +139,8 @@ def move_to_capture_pose(mini, height_mm, pitch_deg):
     mini.set_target(head=pose, body_yaw=0.0)
 
     deadline = time.monotonic() + SETTLE_TIMEOUT_S
+    pos_err = float("nan")
+    rot_err = float("nan")
     while time.monotonic() < deadline:
         time.sleep(SETTLE_POLL_S)
         try:
@@ -154,7 +156,7 @@ def move_to_capture_pose(mini, height_mm, pitch_deg):
         f"move_to_capture_pose: head not settled within {SETTLE_TIMEOUT_S}s "
         f"(pos_err={pos_err*1000:.1f}mm, rot_err={np.rad2deg(rot_err):.2f}deg)"
     )
-    
+
 
 def _log_calibration_summary(calibration_data: dict, config_path) -> None:
     """Build a Processor from the fresh calibration and print the vanishing-point residual.
@@ -189,7 +191,7 @@ def calibrate(
     a clicked extended centre rather than interpolating it from the four extended corners.
     """
     height_mm = OPT_HEIGHT_MM
-    pitch_deg = OPT_PITCH_MM
+    pitch_deg = OPT_PITCH_DEG
 
     # Stiffen the head so the frame the corners are clicked on is captured from the same rigid,
     # non-drifting pose gameplay will later reproduce (see move_to_capture_pose / make_head_rigid).

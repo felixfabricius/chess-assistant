@@ -37,7 +37,8 @@ def main(mini) -> None:
     calibration_metadata_path = setup_dir / "calibration_metadata.json"
     # Live drift check in its own process: overlays the calibrated corners on the undistorted
     # camera feed so you can watch whether the camera has moved away from the calibrated pose.
-    launch_calibration_monitor(calibration_metadata_path)
+    if config.get("monitor_calibration"):
+        launch_calibration_monitor(calibration_metadata_path)
     image_processor = Processor(calibration_metadata_path, "config.yaml")
     board_estimator = BoardEstimator("CNN", config, calibration_metadata_path, model_weights_path=Path(config.vision.model_weights_path), device="cpu")
     input_detector = (
@@ -48,6 +49,7 @@ def main(mini) -> None:
     speaker = Speaker(mini, config)
     engine_config = config.get("engine", {})
     game = ChessGame(
+        model_type=config.get("vision", {}).get("model", "CNN")
         stockfish_path=engine_config.get("stockfish_path"),
         depth=engine_config.get("depth", 16),
     )

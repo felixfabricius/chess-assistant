@@ -220,7 +220,6 @@ class BoardEstimator:
             # cutout naming convention in image_processing.py ever changes.
             square = image_path.stem
             square_dir = image_path.parent
-            setup_dir = square_dir.parent.parent.parent
 
             # Metadata: one-hot of which board corner is top-left in the image. Must match
             # training (model/data.py) - both use TOP_LEFT_OHE_MAP.
