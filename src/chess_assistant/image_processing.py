@@ -471,14 +471,18 @@ class Processor:
                 )
         return geometry
 
-    def warp(self, image_path: Path) -> Path:
+    def warp(self, image_path: Path, out_path: Path | None = None) -> Path:
         image = cv2.imread(image_path)
         # Undistort in memory before warping. The raw frame on disk is never modified, and no
         # undistorted copy of a full frame is written out (only the warped result is saved).
         if self.undistort_map1 is not None:
             image = undistort(image, self.undistort_map1, self.undistort_map2)
         warped_image = cv2.warpPerspective(image, self.matrix, self.image_size)
-        warped_image_path = image_path.parent / (str(image_path.stem) + "_warped.png")
+        if not out_path:
+            warped_image_path = image_path.parent / (str(image_path.stem) + "_warped.png")
+        else:
+            warped_image_path = out_path
+            out_path.parent.mkdir(exist_ok=True, parents=True)
         cv2.imwrite(str(warped_image_path), warped_image)
         # No colour conversion here: the image stays BGR end to end. It is only converted to RGB
         # at the point where it is handed to something that expects RGB (see the .npy crops).
