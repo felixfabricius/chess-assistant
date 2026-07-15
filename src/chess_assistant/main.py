@@ -23,9 +23,6 @@ from chess_assistant.robot import Speaker
 from chess_assistant.calibration import make_head_rigid, move_to_capture_pose
 from chess_assistant.calibration_monitor import launch_calibration_monitor
 
-import json
-import time
-from datetime import datetime
 from reachy_mini import ReachyMini
 
 
@@ -33,7 +30,7 @@ def main(mini) -> None:
     """Set everything up from config.yaml, then run the game loop until the game ends."""
     config = OmegaConf.load("config.yaml")
 
-    setup_dir, pixel_coordinates, robot_pose = setup(mini)
+    setup_dir, _, robot_pose = setup(mini)
     calibration_metadata_path = setup_dir / "calibration_metadata.json"
     # Live drift check in its own process: overlays the calibrated corners on the undistorted
     # camera feed so you can watch whether the camera has moved away from the calibrated pose.
