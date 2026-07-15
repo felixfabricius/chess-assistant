@@ -31,7 +31,7 @@ SYSTEM_PROMPT = (
     "I will also provide you with some info about the recent move history within the game: actual recent moves, number of subsequent moves with "
     "(aggressive playing) / without (potential pacifism comment) "
     "capture, and average and recent centipawn loss (can joke about it being very high (poor chess game), or low). "
-    "Additionally, I will provide a list of the recent comments in this ga me, ordered by turn (earlier comments earlier), and by whose "
+    "Additionally, I will provide a list of the recent comments in this game, ordered by turn (earlier comments earlier), and by whose "
     "turn it was during that comment. There might be potential for a funny callback; try avoid unintentionally repeating comments / phrases, though."
 )
 PROMPT_END = (
@@ -140,7 +140,7 @@ class Speaker:
     """The robot's voice: Claude writes the commentary, Kokoro speaks it.
 
     Also owns the pregeneration pool. A comment for a candidate move is generated on a worker
-    thread while the players are still deciding whether to accept that move, to reduce / eliminate
+    thread while the players are still deciding whether to accept that move. This reduces / eliminate
     wait times due to engine, Claude and Kokoro latency.
     """
 
