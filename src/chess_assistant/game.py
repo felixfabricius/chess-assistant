@@ -170,24 +170,19 @@ class ChessGame:
         initial_loss = 0
         for square in SQUARES:
             square_estimate = getattr(board_estimate, square)
+            piece_at_square = self.board.piece_at(chess.parse_square(square))
+            piece_at_square = "empty" if piece_at_square is None else piece_at_square.symbol()
             if self.model_type == "LLM":
                 # Squared error against the LLM's answer: it only ever gives a one-hot, so the
                 # truth-vs-estimate distance is summed over all 13 labels of the square.
                 for piece in PIECES:
-                    piece_at_square = self.board.piece_at(chess.parse_square(square))
-                    piece_at_square = "empty" if piece_at_square is None else piece_at_square.symbol()
-                    if (
-                        (piece == "empty" and piece_at_square is None)
-                        or piece == piece_at_square
-                    ):
+                    if piece == piece_at_square:
                         initial_loss += (1 - getattr(square_estimate, piece)) ** 2
                     else:
                         initial_loss += getattr(square_estimate, piece) ** 2
             else:
                 # Cross-entropy against the CNN's log-probabilities. The 13 scores have to be
                 # laid out in TARGET_MAP index order, which is what INVERSE_TARGET_MAP is for.
-                piece_at_square = self.board.piece_at(chess.parse_square(square))
-                piece_at_square = "empty" if piece_at_square is None else piece_at_square.symbol()
                 initial_loss += self.loss_fn(
                     torch.tensor(
                         [
