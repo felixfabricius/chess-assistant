@@ -9,7 +9,7 @@ import json
 
 from chess_assistant.calibration import calibrate, position_robot
 
-def setup(mini):
+def setup(mini, mode):
     """
     Prepare a setup directory and put the robot in its capture pose.
 
@@ -27,9 +27,16 @@ def setup(mini):
         config = yaml.safe_load(f)
     root_data_folder = Path(config.get("root_data_folder", "data"))
 
+    assert mode in ["live", "generated", None]
+
     if config.get("setup_folder", {}).get("create_new"):
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        setup_dir = root_data_folder / timestamp
+        # Note: this is not actually used during data generation, so
+        # only mode == "live" has an impact.
+        if mode:
+            setup_dir = root_data_folder / mode / timestamp
+        else:
+            setup_dir = root_data_folder / timestamp
 
         setup_dir.mkdir(parents=True)
 
@@ -56,11 +63,18 @@ def setup(mini):
 
     else:
         assert root_data_folder.is_dir()
-        folders = os.listdir(root_data_folder)
+        if mode:
+            assert (root_data_folder / mode).is_dir()
+            folders = os.listdir(root_data_folder / mode)
+        else:
+            folders = os.listdir(root_data_folder)
         assert len(folders) > 0
 
         # Setup dirs are named by timestamp, so the last one alphabetically is the most recent.
-        setup_dir = root_data_folder / sorted(folders)[-1]
+        if mode:
+            setup_dir = root_data_folder / mode / sorted(folders)[-1]
+        else:
+            setup_dir = root_data_folder / sorted(folders)[-1]         
 
         with open(setup_dir / "metadata.json", "r", encoding="utf-8") as f:
             metadata = json.load(f)
