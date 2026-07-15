@@ -9,12 +9,12 @@ from chess_assistant.model.data import create_dataloader
 from chess_assistant.model.model import SquareClassifier, SquareClassifierMultiHead
 
 
-@pytest.fixture
-def dataloader(scope="module"):
-    return create_dataloader("train", 64)
+@pytest.fixture(scope="module")
+def dataloader():
+    return create_dataloader("train", shuffle=True, batch_size=64)
 
-@pytest.fixture
-def model(scope="module"):
+@pytest.fixture(scope="module")
+def model():
     return SquareClassifier()
 
 def test_forward_pass(dataloader, model):
@@ -25,10 +25,10 @@ def test_forward_pass(dataloader, model):
     assert output.shape == (64, 13)
     assert output.dtype == torch.float32
     end = time.perf_counter()
-    print(f"{end - start:.6f}")
+    print(f"Time taken for batched forward pass with 64 squares: {end - start:.6f}")
 
-@pytest.fixture
-def multihead_model(scope="module"):
+@pytest.fixture(scope="module")
+def multihead_model():
     return SquareClassifierMultiHead()
 
 def test_forward_pass_multihead(dataloader, multihead_model):

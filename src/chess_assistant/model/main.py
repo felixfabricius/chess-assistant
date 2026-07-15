@@ -37,6 +37,11 @@ load_dotenv() # for api keys
 def main(config: DictConfig):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
+    # Used for class weights and evaluate
+    csv_path = Path(config.data.get("csv_path"))
+    assert csv_path.exists()
+
+    
     if config.data.weighting == "inverse_root" and config.note == "":
         config.note = "Weighting: Inverse Root"
     if config.get("debug") and not config.get("prefix"):
@@ -98,8 +103,6 @@ def main(config: DictConfig):
     # Per-head class weights (inverse-sqrt-frequency), computed from the train split via
     # decompose_label. Gated on config.data.weighting exactly like the single-head models.
     if config.data.get("weighting") == "inverse_root":
-        csv_path = Path(config.data.get("csv_path"))
-        assert csv_path.exists()
         data = pl.read_csv(csv_path).filter(pl.col("setup_split").eq("train"))
         counts = data["label"].value_counts()
         n_empty = 0
@@ -176,7 +179,7 @@ def main(config: DictConfig):
             loss_fns=eval_loss_fns,
             loss_weights=loss_weights,
             split="val",
-            csv_path=Path("data/generated/data.csv"),
+            csv_path=csv_path,
             device=device
         )
 
@@ -207,7 +210,7 @@ def main(config: DictConfig):
         },
         cache_path
     )
-    artifact = wandb.Artifact(name=f"model_and_optimizer", type="model")
+    artifact = wandb.Artifact(name="model_and_optimizer", type="model")
     artifact.add_file(cache_path)
     run.log_artifact(artifact)
 

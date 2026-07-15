@@ -197,7 +197,7 @@ def evaluate(model, dataloader, loss_fns, loss_weights, split, csv_path, device)
                     # 1/n rather than 0, so the metric never reaches its floor; dividing by
                     # n - 1 would make it span the full [0, 1] but is undefined for n == 1.
                     correct_move_normalised_rank.append(1 - i / len(estimated_moves))
-                    continue
+                    break
 
             n_valid += 1
 
@@ -215,7 +215,7 @@ def evaluate(model, dataloader, loss_fns, loss_weights, split, csv_path, device)
         "eval/total/avg_loss": total_avg,  # weighted combined loss (diagnostic, mirrors train/total)
         "eval/board/n_valid": n_valid,
         "eval/board/prop_correct_board": correct_moves / n_valid if n_valid > 0 else None,
-        "eval/board/correct_normalised_rank": np.mean(correct_move_normalised_rank),
+        "eval/board/correct_normalised_rank": np.mean(correct_move_normalised_rank) if len(correct_move_normalised_rank) > 0 else None,
     }
 
     return metrics

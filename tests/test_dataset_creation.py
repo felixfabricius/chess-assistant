@@ -53,7 +53,7 @@ def test_mask_transform(mask):
         # If the order of the transforms changes, this test has to be adjusted.
     train_transformed_mask = modified_train_transform(mask)
     eval_transformed_mask = EVAL_TRANSFORM(mask)
-    torch.allclose(train_transformed_mask, eval_transformed_mask, atol=1e-7)
+    assert torch.allclose(train_transformed_mask, eval_transformed_mask, atol=1e-7)
 
 def test_target_transform(dataset):
     # a1 is a (non-empty) white rook, so all three decomposed targets are populated.
@@ -78,7 +78,7 @@ def test_dataloader(batch_size):
 
 ### Test datatypes
 def test_datatypes():
-    dataloader = create_dataloader("train", 64)
+    dataloader = create_dataloader(split="train", batch_size=64)
     batch = next(iter(dataloader))
     assert batch[0].dtype == torch.float32
     assert batch[1].dtype == torch.float32
