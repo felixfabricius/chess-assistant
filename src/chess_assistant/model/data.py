@@ -55,9 +55,10 @@ class squareDataset(Dataset):
 
     def __getitem__(self, idx):
         square = self.data[idx, "square"]
-        # square_image_path in the csv was written with str(Path(...)) on whichever OS
-        # generated the data (currently Windows), so it may contain "\" separators.
-        # Parse it as a Windows path first so it resolves correctly on Linux too.
+        # Newly generated data writes square_image_path with .as_posix() (forward slashes), so it
+        # is portable as-is. This PureWindowsPath parse stays only to read LEGACY csvs generated on
+        # Windows with str(Path(...)), which stored "\" separators; PureWindowsPath is a pure path
+        # (safe to instantiate on any OS) and accepts both "\" and "/", so it resolves either form.
         raw_path = PureWindowsPath(self.data[idx, "square_image_path"]).as_posix()
         # The CSV stores the annotated-image path; the model input is the 4-channel masked
         # array saved alongside it in the same per-square directory.
@@ -99,7 +100,7 @@ class squareDataset(Dataset):
         setup_id = self.data[idx, "setup_id"]
         if setup_id not in self.setup_metadata_store:
             setup_metadata_path = Path("data/generated") / setup_id / "calibration_metadata.json"
-            with open(setup_metadata_path, "r") as f:
+            with open(setup_metadata_path, "r", encoding="utf-8") as f:
                 setup_metadata = json.load(f)
             self.setup_metadata_store[setup_id] = setup_metadata["camera_natural_orientation"]["order"]["tl"]
         metadata[TOP_LEFT_OHE_MAP[self.setup_metadata_store[setup_id]]] = 1

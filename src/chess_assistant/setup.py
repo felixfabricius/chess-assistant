@@ -23,7 +23,7 @@ def setup(mini):
     session is written to, the four clicked board corners in pixels, and the (height_mm,
     pitch_deg) pose that main.py replays before each capture.
     """
-    with open("config.yaml", "r") as f:
+    with open("config.yaml", "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     root_data_folder = Path(config.get("root_data_folder", "data"))
 

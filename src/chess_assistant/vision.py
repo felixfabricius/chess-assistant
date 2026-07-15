@@ -160,7 +160,7 @@ class BoardEstimator:
                 model.load_state_dict(state_dict)
             assert device in ["cpu", "cuda", None, torch.device("cpu"), torch.device("cuda")]
             self.device = torch.device(device) if device is not None else torch.device("cpu")
-            with open(calibration_metadata_path, "r") as f:
+            with open(calibration_metadata_path, "r", encoding="utf-8") as f:
                 calibration_metadata = json.load(f)
             # The model's only metadata: which board corner is top-left in the image.
             self.top_left_corner = calibration_metadata["camera_natural_orientation"]["order"]["tl"]

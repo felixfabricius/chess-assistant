@@ -39,14 +39,14 @@ def main(mini) -> None:
     image_processor = Processor(calibration_metadata_path, "config.yaml")
     board_estimator = BoardEstimator("CNN", config, calibration_metadata_path, model_weights_path=Path(config.vision.model_weights_path), device="cpu")
     input_detector = (
-        InputDetector(input_type="robot", mini=mini, calibration_metadata_path=calibration_metadata_path) 
+        InputDetector(input_source="robot", mini=mini, calibration_metadata_path=calibration_metadata_path) 
         if config.get("input", {"source": "robot"}).get("source", "robot") == "robot" 
-        else InputDetector(input_type="keyboard", target_key=None)
+        else InputDetector(input_source="keyboard", target_key=None)
     )
     speaker = Speaker(mini, config)
     engine_config = config.get("engine", {})
     game = ChessGame(
-        model_type=config.get("vision", {}).get("model", "CNN")
+        model_type=config.get("vision", {}).get("model", "CNN"),
         stockfish_path=engine_config.get("stockfish_path"),
         depth=engine_config.get("depth", 16),
     )
@@ -62,7 +62,7 @@ def main(mini) -> None:
     while not game_over:
         i += 1
         print("Ready for move")
-        move_made = input_detector.detect_input(type="move_made")
+        move_made = input_detector.detect_input(input_type="move_made")
         print(f"move made: {move_made}")
         # Snap the head back to the exact calibrated pose so every board image is taken from
         # the same position (the head may have drifted while operating the antennas).
@@ -89,7 +89,7 @@ def main(mini) -> None:
             # (~0.6x realtime) and needs every bit of it.
             speaker.pregenerate_comment(candidate, i, game)
             speaker.suggest_move(candidate["move"])
-            move_estimate_rejected = input_detector.detect_input(type="move_estimate_rejected", alloted_time=config.get("review_time", 4))
+            move_estimate_rejected = input_detector.detect_input(input_type="move_estimate_rejected", alloted_time=config.get("review_time", 4))
             move_estimate_accepted = not move_estimate_rejected
             if move_estimate_accepted:
                 accepted = candidate
