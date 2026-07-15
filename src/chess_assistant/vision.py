@@ -181,7 +181,6 @@ class BoardEstimator:
         """
         if self.model_type == "LLM":
             image_path = image_path.parent / (image_path.stem + "_annotated" + image_path.suffix)
-            print(image_path)
             message = self.client.messages.create(
                 model=self.model_version,
                 max_tokens=128,
@@ -207,7 +206,6 @@ class BoardEstimator:
                 copied=False,
                 copied_from=None
             )
-            print(message.content[0].text)
             try:
                 setattr(square_estimate, message.content[0].text, 1.)
             except Exception as e:
@@ -271,31 +269,8 @@ class BoardEstimator:
         """
         for square in SQUARES:
             image_path = squares_dir / square / f"{square}.png"
-            if (
-                getattr(self.board_estimate, square) # these are initialised as None
-                # TODO: never taken. The plan was to skip re-classifying a square whose crop is
-                # unchanged since the last board image (most of the board is static between
-                # moves) and copy the previous estimate over, recording where it was copied from.
-                # It needs an image-similarity check to gate on, and the branch below is not
-                # correct yet: getattr/setattr do NOT do nested attribute access, so the
-                # f"{square}.copied" strings below set string-keyed junk attributes rather than
-                # fields of the SquareEstimate. Left in place as the sketch of the fix.
-                and 1 == 2
-            ):
-                square_estimate = getattr(self.recent_board, square)
-                setattr(
-                    self.board_estimate, f"{square}.copied_from",
-                    (
-                        getattr(self.recent_board, f"{square}.copied_from")
-                        if getattr(self.recent_board, f"{square}.copied")
-                        else getattr(self.recent_board, f"{square}.image_path")
-                    )
-                )
-                setattr(self.board_estimate, f"{square}.image_path", image_path)
-                setattr(self.board_estimate, f"{square}.copied", True)
-            else:
-                square_estimate = self.estimate_square(image_path)
-                setattr(self.board_estimate, square, square_estimate)
+            square_estimate = self.estimate_square(image_path)
+            setattr(self.board_estimate, square, square_estimate)
 
         return self.board_estimate
 
