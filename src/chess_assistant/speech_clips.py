@@ -7,9 +7,14 @@ squares, four promotion pieces, two castling sides -- so all of it can be synthe
 of time. "E2 to E4?" is then two array lookups and a concatenate rather than ~2.2s of
 synthesis while the players wait.
 
+Reading and writing the cache are separate on purpose. bake_clips() synthesizes and is a setup
+step (see pregenerate_speech); load_clips() only reads, takes no synthesizer, and is what the
+game uses -- so a cold cache costs a warning and the old live-synthesis latency, never a
+five-minute stall in the middle of starting a game.
+
 The module deliberately imports neither kokoro nor reachy_mini: synthesis is injected into
-load_or_bake() as a plain `synth(text) -> waveform` callable. That is what lets the audition
-CLI and the tests use this without a Speaker, a robot, or a torch model.
+bake_clips() as a plain `synth(text) -> waveform` callable. That is what lets the audition CLI
+and the tests use this without a Speaker, a robot, or a torch model.
 
 Assembly returns clip *keys*, never audio (announcement_parts -> ["origin/e2", "dest/e4"]).
 Keeping that boundary is what makes the inventory a data decision: if spliced prosody ever
@@ -34,7 +39,7 @@ CLIP_CACHE_DIR = Path(".cache/speech")
 DEFAULT_SPLICE_GAP_MS = 60
 
 # Silence trimming and joins. These are applied at load time, not bake time, so they are free
-# to tune by ear without re-synthesizing anything -- see load_or_bake().
+# to tune by ear without re-synthesizing anything -- see _finish().
 _FRAME = 512      # 21ms analysis window
 _HOP = 128        # 5.3ms resolution
 _TOP_DB = 40.0    # keep every frame within 40dB of the loudest one
@@ -219,22 +224,14 @@ def cache_header(voice: str, lang_code: str, speed: float = 1.0) -> dict:
     }
 
 
-def load_or_bake(
-    cache_dir, voice: str, lang_code: str, synth, texts: dict[str, str] | None = None
-) -> dict[str, np.ndarray]:
-    """Return {clip key: playable waveform}, synthesizing whatever isn't already cached.
+def _cache_state(cache_dir, voice: str, lang_code: str, texts: dict[str, str]):
+    """Read the cache: what's usable already, and what still needs synthesizing.
 
-    `synth` is a `text -> float32 waveform` callable, injected so this module never has to
-    import kokoro.
-
-    What lands on disk is the *raw* Kokoro output; trimming and fading happen here, on load.
-    That keeps top_db / pad_ms / fade_ms tunable by ear with no re-bake and no manifest fields,
-    for ~10MB of disk and ~100ms of startup. The first bake is slow (~5-8 minutes for the full
-    150 clips) but happens once per voice, ever.
+    Deliberately does not create anything -- load_clips() reads through here, and a read must
+    not conjure up the directory it is reading. A cache_dir that isn't there simply yields
+    nothing usable and everything stale.
     """
-    texts = texts if texts is not None else clip_texts()
     voice_dir = Path(cache_dir) / voice
-    voice_dir.mkdir(parents=True, exist_ok=True)
 
     header = cache_header(voice, lang_code)
     manifest = _read_manifest(voice_dir)
@@ -251,6 +248,54 @@ def load_or_bake(
             except (ValueError, OSError):
                 pass  # truncated or half-written -- just bake it again
         stale.append((key, text, path))
+    return voice_dir, header, cached, raw, stale
+
+
+def _finish(raw: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Raw Kokoro output -> playable clips.
+
+    Kept out of the bake so what lands on disk stays raw, which is what makes top_db / pad_ms /
+    fade_ms tunable by ear with no re-bake and no manifest fields -- for ~10MB of disk and
+    ~100ms of startup.
+    """
+    clips = {}
+    for key, audio in raw.items():
+        clip = fade(trim(audio))
+        if not len(clip):
+            print(f"speech: WARNING {key!r} trimmed to nothing -- Kokoro produced silence")
+        clips[key] = clip
+    return clips
+
+
+def load_clips(
+    cache_dir, voice: str, lang_code: str, texts: dict[str, str] | None = None
+) -> dict[str, np.ndarray]:
+    """Return {clip key: playable waveform} for whatever is already cached.
+
+    Takes no `synth`, so it cannot synthesize: a clip that isn't cached is simply absent from
+    the result, and the caller decides what that means. This is the path the game uses --
+    baking 150 clips is a setup step (see pregenerate_speech), not something to discover
+    halfway through starting a game.
+    """
+    texts = texts if texts is not None else clip_texts()
+    _, _, _, raw, _ = _cache_state(cache_dir, voice, lang_code, texts)
+    return _finish(raw)
+
+
+def bake_clips(
+    cache_dir, voice: str, lang_code: str, synth, texts: dict[str, str] | None = None
+) -> dict[str, np.ndarray]:
+    """Synthesize whatever isn't cached, then return the full library.
+
+    `synth` is a `text -> float32 waveform` callable, injected so this module never has to
+    import kokoro. Slow by nature (~5-8 minutes for all 150 clips) but done once per voice,
+    ever, and resumable: a crash keeps everything already baked.
+    """
+    texts = texts if texts is not None else clip_texts()
+    voice_dir = Path(cache_dir) / voice
+    voice_dir.mkdir(parents=True, exist_ok=True)
+
+    _, header, cached, raw, stale = _cache_state(cache_dir, voice, lang_code, texts)
 
     if stale:
         print(f"speech: baking {len(stale)} clip(s) for {voice} -- the first run takes a few minutes")
@@ -270,10 +315,4 @@ def load_or_bake(
             _write_manifest(voice_dir, header, cached)
             print(f"speech: [{i}/{len(stale)}] {key} -- {text!r}")
 
-    clips = {}
-    for key, audio in raw.items():
-        clip = fade(trim(audio))
-        if not len(clip):
-            print(f"speech: WARNING {key!r} trimmed to nothing -- Kokoro produced silence")
-        clips[key] = clip
-    return clips
+    return _finish(raw)

@@ -6,7 +6,29 @@ moves to work out what you just played, and then comments on it out loud — pra
 and roasting the bad ones.
 
 > **Note:** this README is a work in progress. Setup instructions, architecture, and results are
-> still to come.
+> still to come — the Setup section below is a stub covering one step of many.
+
+## Setup
+
+> **TODO:** this section only documents the speech cache. Still to write: `uv sync`, installing
+> Stockfish, the `.env` file (`ANTHROPIC_API_KEY`), and board/camera calibration.
+
+### Pregenerate the move announcements
+
+```bash
+uv run python -m chess_assistant.pregenerate_speech
+```
+
+Run this once before the first game. It synthesizes the ~150 fragments that every move
+suggestion is spliced together from — `"E2 to,"`, `"E4?"`, `"Castle kingside?"` and so on — and
+caches them under `.cache/speech/<voice>/` (gitignored, ~10 MB). Takes 5–8 minutes. It is
+resumable: a crash keeps whatever it already baked, and re-running only fills the gaps.
+
+This step is **optional**. Skip it and the robot still plays — it just falls back to
+synthesizing each suggestion live, which costs about 2.2 seconds per suggested move, on the
+main thread, while everyone waits. It warns you at startup if the cache is cold.
+
+Re-run it after changing `speaker.voice` in `config.yaml`, which invalidates the cache.
 
 ## License
 

@@ -8,10 +8,11 @@ from chess_assistant.speech_clips import (
     KOKORO_SAMPLE_RATE,
     PROMOTION_SQUARES,
     announcement_parts,
+    bake_clips,
     clip_texts,
     concat,
     fade,
-    load_or_bake,
+    load_clips,
     trim,
 )
 
@@ -110,7 +111,7 @@ def test_trim_is_stable_under_reapplication():
 
 
 def test_trim_of_pure_silence_is_empty_rather_than_an_exception():
-    """Kokoro producing nothing is rare but real. load_or_bake warns; it must not blow up."""
+    """Kokoro producing nothing is rare but real. _finish() warns; it must not blow up."""
     assert len(trim(np.zeros(4800, dtype=np.float32))) == 0
 
 
@@ -168,7 +169,11 @@ def synth():
 
 
 def bake(cache_dir, synth, voice="bm_george", texts=None):
-    return load_or_bake(cache_dir, voice, "b", synth, texts=texts if texts is not None else TEXTS)
+    return bake_clips(cache_dir, voice, "b", synth, texts=texts if texts is not None else TEXTS)
+
+
+def load(cache_dir, voice="bm_george", texts=None):
+    return load_clips(cache_dir, voice, "b", texts=texts if texts is not None else TEXTS)
 
 
 def test_bake_synthesizes_every_clip_and_returns_playable_audio(tmp_path, synth):
@@ -252,4 +257,53 @@ def test_the_manifest_survives_a_crash_partway_through_a_bake(tmp_path):
 
 def test_bake_raises_if_the_synthesizer_returns_no_audio(tmp_path):
     with pytest.raises(RuntimeError, match="no audio"):
-        load_or_bake(tmp_path, "bm_george", "b", lambda text: np.zeros(0, dtype=np.float32), texts=TEXTS)
+        bake_clips(tmp_path, "bm_george", "b", lambda text: np.zeros(0, dtype=np.float32), texts=TEXTS)
+
+
+### load_clips: the read-only path the game uses
+
+def test_load_clips_returns_nothing_for_a_cache_that_was_never_baked(tmp_path):
+    assert load(tmp_path / "nope") == {}
+
+
+def test_load_clips_does_not_create_the_cache_directory(tmp_path):
+    """A read must not conjure up the thing it is reading -- otherwise a game started on a cold
+    cache leaves an empty .cache/speech/<voice>/ behind to confuse the next person."""
+    cache = tmp_path / "nope"
+    load(cache)
+
+    assert not cache.exists()
+
+
+def test_load_clips_returns_everything_after_a_bake(tmp_path, synth):
+    baked = bake(tmp_path, synth)
+    loaded = load(tmp_path)
+
+    assert set(loaded) == set(baked)
+    assert all(np.array_equal(loaded[key], baked[key]) for key in baked)
+
+
+def test_load_clips_ignores_a_cache_baked_for_a_different_voice(tmp_path, synth):
+    bake(tmp_path, synth, voice="bm_george")
+    assert load(tmp_path, voice="am_michael") == {}
+
+
+def test_load_clips_ignores_a_stale_manifest(tmp_path, synth):
+    """Stale means a different kokoro version, speed or cache_version. Handing back audio baked
+    under the old one would splice two voices together at a join -- a silent prosody mismatch,
+    which is far worse to debug than a miss."""
+    bake(tmp_path, synth)
+    manifest_path = tmp_path / "bm_george" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["kokoro_versions"] = "kokoro=0.0.1,misaki=0.0.1"
+    manifest_path.write_text(json.dumps(manifest))
+
+    assert load(tmp_path) == {}
+
+
+def test_load_clips_skips_only_the_clip_that_is_missing(tmp_path, synth):
+    bake(tmp_path, synth)
+    (tmp_path / "bm_george" / "dest" / "e4.npy").unlink()
+
+    loaded = load(tmp_path)
+    assert set(loaded) == set(TEXTS) - {"dest/e4"}

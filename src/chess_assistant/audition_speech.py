@@ -24,9 +24,9 @@ from chess_assistant.speech_clips import (
     DEFAULT_SPLICE_GAP_MS,
     KOKORO_SAMPLE_RATE,
     announcement_parts,
+    bake_clips,
     concat,
     fade,
-    load_or_bake,
     trim,
 )
 
@@ -66,10 +66,10 @@ def main() -> None:
     from kokoro import KPipeline  # imported late: the arg parse above shouldn't wait on torch
 
     pipeline = KPipeline(lang_code=lang_code)
-    clips = load_or_bake(
+    clips = bake_clips(
         CLIP_CACHE_DIR, args.voice, lang_code, lambda text: synthesize(pipeline, text, voice=args.voice)
     )
-    # Re-trim at the requested threshold: load_or_bake caches raw audio and trims at its own
+    # Re-trim at the requested threshold: bake_clips caches raw audio and trims at its own
     # default, so --top-db needs to be applied over the top rather than through it.
     if args.top_db != 40.0:
         voice_dir = CLIP_CACHE_DIR / args.voice

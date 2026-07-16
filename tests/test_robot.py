@@ -12,7 +12,7 @@ from chess_assistant.robot import (
     build_prompt,
     format_uci_for_speech,
 )
-from chess_assistant.speech_clips import KOKORO_SAMPLE_RATE
+from chess_assistant.speech_clips import KOKORO_SAMPLE_RATE, bake_clips, clip_texts
 
 
 def move_info(**overrides):
@@ -284,15 +284,7 @@ def candidate(uci, **overrides):
     return {"move": uci, "loss": 0.1, "move_info": info}
 
 
-@pytest.fixture
-def speaker(monkeypatch, tmp_path):
-    """The real Speaker with only its externals swapped out.
-
-    Deliberately not a hand-written subclass mirroring __init__: that mirror silently drifts
-    every time __init__ gains an attribute. Running the real one also exercises load_or_bake,
-    the manifest round-trip and the clip dict for free on every test below.
-    """
-    played = []
+def _fake_externals(monkeypatch, tmp_path, played):
     monkeypatch.setattr(robot, "KPipeline", lambda **kwargs: None)
     monkeypatch.setattr(robot.anthropic, "Anthropic", FakeClient)
     # comment_on_move plays through mini.media, which we don't have.
@@ -300,9 +292,39 @@ def speaker(monkeypatch, tmp_path):
     monkeypatch.setattr(robot, "CLIP_CACHE_DIR", tmp_path)  # never touch the real .cache
     monkeypatch.setattr(Speaker, "_synthesize", _fake_synthesize)
 
+
+@pytest.fixture
+def speaker(monkeypatch, tmp_path):
+    """The real Speaker with only its externals swapped out, over a warm cache.
+
+    Deliberately not a hand-written subclass mirroring __init__: that mirror silently drifts
+    every time __init__ gains an attribute. Running the real one also exercises load_clips and
+    the manifest round-trip for free on every test below.
+
+    The bake is explicit here because Speaker no longer does one -- and it must stay explicit.
+    Without it every suggest_move test would quietly fall through to the live-synthesis
+    fallback and still pass, testing nothing. This mirrors reality: pregenerate_speech runs,
+    then the game runs.
+    """
+    played = []
+    _fake_externals(monkeypatch, tmp_path, played)
+    bake_clips(tmp_path, "bm_george", "b", lambda text: _tone())
+
     spk = Speaker(mini=None, config={"speaker": {"voice": "bm_george"}})
     spk.played = played
     spk.synthesized = []  # forget the bake; the tests below care about the hot path
+    yield spk
+    spk.shutdown()
+
+
+@pytest.fixture
+def cold_speaker(monkeypatch, tmp_path):
+    """A Speaker with no cache at all -- nothing has ever been baked."""
+    played = []
+    _fake_externals(monkeypatch, tmp_path, played)
+
+    spk = Speaker(mini=None, config={"speaker": {"voice": "bm_george"}})
+    spk.played = played
     yield spk
     spk.shutdown()
 
@@ -399,6 +421,58 @@ def test_suggest_move_falls_back_to_live_synthesis_if_a_clip_is_missing(speaker)
 
     assert speaker.synthesized == ["E2 to E4?"]
     assert len(speaker.played) == 1
+
+
+### A cold cache is a warning, not an 8-minute stall
+
+def test_speaker_never_bakes_on_a_cold_cache(monkeypatch, tmp_path, capsys):
+    """The whole point of pregenerate_speech: constructing a Speaker must not silently start
+    synthesizing 150 clips, which used to stall main.py for 5-8 minutes right after
+    calibration and before the first move.
+
+    Built here rather than via the cold_speaker fixture because the warning is printed during
+    __init__ -- from a fixture that lands in setup's capture, where the test body cannot see it.
+    """
+    _fake_externals(monkeypatch, tmp_path, [])
+    spk = Speaker(mini=None, config={"speaker": {"voice": "bm_george"}})
+    try:
+        assert spk.clips == {}
+        assert getattr(spk, "synthesized", []) == []
+
+        out = capsys.readouterr().out
+        assert f"{len(clip_texts())}/{len(clip_texts())} clips missing" in out
+        assert "uv run python -m chess_assistant.pregenerate_speech --voice bm_george" in out
+    finally:
+        spk.shutdown()
+
+
+def test_a_warm_speaker_says_nothing_about_missing_clips(monkeypatch, tmp_path, capsys):
+    _fake_externals(monkeypatch, tmp_path, [])
+    bake_clips(tmp_path, "bm_george", "b", lambda text: _tone())
+    capsys.readouterr()  # drop the bake's own progress output
+
+    spk = Speaker(mini=None, config={"speaker": {"voice": "bm_george"}})
+    try:
+        assert capsys.readouterr().out == ""
+    finally:
+        spk.shutdown()
+
+
+def test_a_cold_speaker_still_speaks(cold_speaker):
+    """A missing cache must never block a game -- it just costs what it always used to."""
+    cold_speaker.suggest_move("e2e4", candidate("e2e4")["move_info"])
+
+    assert cold_speaker.synthesized == ["E2 to E4?"]
+    assert len(cold_speaker.played) == 1
+
+
+def test_suggest_move_does_not_reprint_the_warning_on_every_move(cold_speaker, capsys):
+    """The startup warning is complete (self.clips never shrinks), so repeating it per move
+    would be pure noise across a whole game."""
+    for _ in range(3):
+        cold_speaker.suggest_move("e2e4", candidate("e2e4")["move_info"])
+
+    assert capsys.readouterr().out == ""
 
 
 def test_speaker_derives_the_language_from_the_voice(monkeypatch, tmp_path):

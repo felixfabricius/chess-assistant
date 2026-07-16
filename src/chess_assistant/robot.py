@@ -16,8 +16,9 @@ from chess_assistant.speech_clips import (
     DEFAULT_SPLICE_GAP_MS,
     KOKORO_SAMPLE_RATE,
     announcement_parts,
+    clip_texts,
     concat,
-    load_or_bake,
+    load_clips,
 )
 
 load_dotenv()
@@ -274,14 +275,27 @@ class Speaker:
 
         self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pregen")
         # KPipeline is a torch model with no thread-safety guarantees, and a worker may be
-        # synthesizing a comment while the main thread bakes or falls back to live synthesis.
-        # Must exist before load_or_bake below, which synthesizes through _synthesize.
+        # synthesizing a comment while the main thread falls back to live synthesis.
         self.pipeline_lock = threading.Lock()
 
-        # Every move suggestion is spliced from these, so nothing is synthesized on the
-        # critical path -- and the lock above stays free for the comment worker all through the
-        # review window, which is the runway main.py is banking on.
-        self.clips = load_or_bake(CLIP_CACHE_DIR, self.voice, lang_code, self._synthesize)
+        # Read-only: generating these is a setup step (see pregenerate_speech), not something
+        # to discover eight minutes into starting a game. Every move suggestion is spliced from
+        # them, so nothing is synthesized on the critical path -- which leaves the lock above
+        # free for the comment worker all through the review window, the runway main.py banks on.
+        self.clips = load_clips(CLIP_CACHE_DIR, self.voice, lang_code)
+        self._warn_about_missing_clips()
+
+    def _warn_about_missing_clips(self) -> None:
+        """Say so, once, at startup. A cold cache is not fatal -- it just costs ~2.2s of Kokoro
+        per suggestion, exactly as it did before the clips existed."""
+        expected = clip_texts()
+        missing = set(expected) - set(self.clips)
+        if not missing:
+            return
+        print(f"speech: {len(missing)}/{len(expected)} clips missing for {self.voice}.")
+        print("speech: falling back to live synthesis (~2.2s per suggestion). To remove that "
+              "latency, run:")
+        print(f"speech:   uv run python -m chess_assistant.pregenerate_speech --voice {self.voice}")
 
     def _synthesize(self, text: str) -> np.ndarray:
         with self.pipeline_lock:
@@ -294,12 +308,9 @@ class Speaker:
         e1 to g1. Without it, the four castling UCIs are assumed to be castles.
         """
         parts = announcement_parts(move, move_info)
-        missing = [key for key in parts if key not in self.clips]
-        if missing:
-            # Shouldn't happen: a test pins that every key assembly can emit is in the
-            # inventory. If it somehow does, be slow rather than silent -- this is exactly the
-            # pre-cache behaviour.
-            print(f"speech: no clip for {missing} -- falling back to live synthesis")
+        if any(key not in self.clips for key in parts):
+            # Already reported once at startup, so don't repeat it every move: self.clips never
+            # shrinks, which makes that warning complete and authoritative.
             play(self.mini, self._synthesize(f"{format_uci_for_speech(move)}?"))
             return
         play(self.mini, concat([self.clips[key] for key in parts], self.splice_gap_ms))

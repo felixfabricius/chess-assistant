@@ -45,10 +45,14 @@ speaker:
   # Kokoro synthesizes at ~0.6x realtime, so a long comment is slow to generate AND slow
   # to listen to.
   max_tokens: 64
+  # Kokoro's first letter picks the language, so "bm_*" is British and "am_*" American.
+  # Changing this invalidates the pregenerated move-announcement clips: re-run
+  # `uv run python -m chess_assistant.pregenerate_speech` or the robot falls back to
+  # synthesizing every suggestion live (~2.2s each).
   voice: bm_george
   recent_moves: 6
   recent_cp_losses: 5
-  splice_gap_ms: 40   # silence between the pregenerated clips of a move suggestion
+  splice_gap_ms: 60   # silence between the pregenerated clips of a move suggestion
                       # ("E2 to," + "E4?"). Tune by ear: uv run python -m
                       # chess_assistant.audition_speech --sweep
   # The closing roast is 3-4 sentences, not a one-liner, so it gets its own cap.
