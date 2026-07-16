@@ -48,10 +48,35 @@ speaker:
   voice: bm_george
   recent_moves: 6
   recent_cp_losses: 5
+  splice_gap_ms: 40   # silence between the pregenerated clips of a move suggestion
+                      # ("E2 to," + "E4?"). Tune by ear: uv run python -m
+                      # chess_assistant.audition_speech --sweep
+  # The closing roast is 3-4 sentences, not a one-liner, so it gets its own cap.
+  # ~60 words is ~110 tokens; 200 leaves headroom without licensing a monologue.
+  outro:
+    max_tokens: 200
+    max_words: 60
+
+# Played once the game ends. Entirely best-effort: any failure here is logged and skipped,
+# since the game is already over by the time any of it runs.
+outro:
+  enabled: True
+  dance: # checkmate only -- nobody celebrates a stalemate
+    dataset: pollen-robotics/reachy-mini-dances-library
+    move: groovy_sway_and_roll
+    # groovy_sway_and_roll is a 1.84s loop unit rather than a whole dance, so it is repeated.
+    # 4 repeats (~7.4s) is the floor; past that the loop only keeps going while the roast is
+    # still being written and synthesized, up to 8 (~14.7s), so the robot never stands in
+    # silence waiting for Claude.
+    min_repeats: 4
+    max_repeats: 8
+  sleep: # every ending, checkmate or draw
+    dataset: pollen-robotics/reachy-mini-emotions-library
+    move: downcast1
 
 # Seconds the players get to reject a suggested move. Doubles as the window in which that
 # move's comment is pre-generated in the background (stockfish ~0.2s + claude ~1.5s +
 # kokoro ~0.6x the spoken duration). Raise it if comments still lag behind acceptance.
 review_time: 4
 
-monitor_calibration: False
+monitor_calibration: True

@@ -20,6 +20,7 @@ from chess_assistant.game import ChessGame
 from chess_assistant.image_processing import Processor
 from chess_assistant.input import InputDetector
 from chess_assistant.robot import Speaker
+from chess_assistant.outro import finale
 from chess_assistant.calibration import make_head_rigid, move_to_capture_pose
 from chess_assistant.calibration_monitor import launch_calibration_monitor
 
@@ -88,7 +89,9 @@ def main(mini) -> None:
             # roughly 2.5s of extra runway for free. Kokoro synthesis is the slow stage
             # (~0.6x realtime) and needs every bit of it.
             speaker.pregenerate_comment(candidate, i, game)
-            speaker.suggest_move(candidate["move"])
+            # move_info, not just the UCI: "e1g1" alone cannot say whether this is castling or
+            # a queen walking from e1 to g1, and the two are announced differently.
+            speaker.suggest_move(candidate["move"], candidate["move_info"])
             move_estimate_rejected = input_detector.detect_input(input_type="move_estimate_rejected", alloted_time=config.get("review_time", 4))
             move_estimate_accepted = not move_estimate_rejected
             if move_estimate_accepted:
@@ -106,8 +109,11 @@ def main(mini) -> None:
         game.apply_move(move, move_info=move_info, cp_loss=move_cp_loss, new_score=new_score)
 
         game_over = game.board.is_game_over() # checkmate, stalemate, or any draw condition
-        if game.board.is_checkmate():
-            speaker.exclaim_win(game)
+        if game_over:
+            # Dance, roast the game, sulk. Best-effort, and must run before shutdown()
+            # below, which cancels the futures the roast is generated on.
+            finale(mini, speaker, game, config)
+            break # no next turn to switch to
 
         input_detector.switch_turn()
 

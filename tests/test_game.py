@@ -239,3 +239,113 @@ def test_history_snapshot_of_a_fresh_game(make_game):
     assert snapshot["quiet_streak"] == 0
     assert snapshot["average_cp_loss"] == {"white": 0.0, "black": 0.0}
     assert snapshot["last_cp_losses"] == {"white": [], "black": []}
+
+
+### end-of-game summary, as consumed by the closing roast
+
+SCHOLARS_MATE = ["e2e4", "e7e5", "f1c4", "b8c6", "d1h5", "g8f6", "h5f7"]
+FOOLS_MATE = ["f2f3", "e7e5", "g2g4", "d8h4"]
+# Black to move, no legal move, not in check.
+STALEMATE_FEN = "7k/5Q2/6K1/8/8/8/8/8 b - - 0 1"
+
+
+def play(game, ucis):
+    """Push moves without an engine: apply_move only reaches Stockfish if cp_loss is None."""
+    for uci in ucis:
+        game.apply_move(uci, cp_loss=0, new_score=0)
+
+
+def test_outcome_summary_of_a_checkmate(make_game):
+    game = make_game()
+    play(game, SCHOLARS_MATE)
+
+    assert game.outcome_summary() == {
+        "result": "1-0", "termination": "CHECKMATE", "winner": "white",
+    }
+
+
+def test_outcome_summary_names_black_as_the_winner(make_game):
+    """The winner is read off the outcome, not off whose turn it is -- getting that backwards
+    is invisible in a white win."""
+    game = make_game()
+    play(game, FOOLS_MATE)
+
+    assert game.outcome_summary() == {
+        "result": "0-1", "termination": "CHECKMATE", "winner": "black",
+    }
+
+
+def test_outcome_summary_of_a_stalemate_has_no_winner(make_game):
+    """winner None means a draw, and must stay distinguishable from a win."""
+    game = make_game(fen=STALEMATE_FEN)
+
+    assert game.outcome_summary() == {
+        "result": "1/2-1/2", "termination": "STALEMATE", "winner": None,
+    }
+
+
+def test_outcome_summary_of_a_game_still_being_played(make_game):
+    """board.outcome() is None mid-game. Reporting that must not raise."""
+    game = make_game()
+    play(game, ["e2e4"])
+
+    assert game.outcome_summary() == {
+        "result": "*", "termination": "UNFINISHED", "winner": None,
+    }
+
+
+def test_worst_blunder_is_the_costliest_move(make_game):
+    game = make_game()
+    game.move_log = [
+        {"uci": "e2e4", "san": "e4", "turn": "white", "capture": False, "cp_loss": 10},
+        {"uci": "d8h4", "san": "Qh4", "turn": "black", "capture": False, "cp_loss": 412},
+        {"uci": "b1c3", "san": "Nc3", "turn": "white", "capture": False, "cp_loss": 20},
+    ]
+
+    assert game.worst_blunder()["san"] == "Qh4"
+
+
+def test_worst_blunder_of_a_game_with_no_moves(make_game):
+    assert make_game().worst_blunder() is None
+
+
+def test_final_snapshot_summarizes_the_whole_game(make_game):
+    game = make_game()
+    play(game, SCHOLARS_MATE)
+
+    snapshot = game.final_snapshot()
+
+    assert snapshot["result"] == "1-0"
+    assert snapshot["winner"] == "white"
+    assert snapshot["total_plies"] == 7
+    assert snapshot["captures"] == 1  # Qxf7#
+    assert [entry["san"] for entry in snapshot["moves"]] == [
+        "e4", "e5", "Bc4", "Nc6", "Qh5", "Nf6", "Qxf7#",
+    ]
+    # The move number is what lets the roast line a move up with the comment it made on it.
+    assert [entry["move_number"] for entry in snapshot["moves"]] == [1, 1, 2, 2, 3, 3, 4]
+
+
+def test_final_snapshot_does_not_alias_the_live_move_log(make_game):
+    """Same contract as history_snapshot: a worker reads this while the main thread may
+    still be mutating move_log."""
+    game = make_game()
+    play(game, ["e2e4"])
+
+    snapshot = game.final_snapshot()
+    play(game, ["e7e5"])
+
+    assert len(snapshot["moves"]) == 1
+
+
+def test_final_snapshot_tolerates_a_move_log_without_move_numbers(make_game):
+    """move_number was added to move_log after the fact, and it is read back with .get()."""
+    game = make_game()
+    game.move_log = [
+        {"uci": "e2e4", "san": "e4", "turn": "white", "capture": False, "cp_loss": 10},
+    ]
+
+    snapshot = game.final_snapshot()
+
+    assert snapshot["moves"][0]["move_number"] is None
+    assert snapshot["worst_blunder"]["move_number"] is None

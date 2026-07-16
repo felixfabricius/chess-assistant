@@ -360,6 +360,7 @@ class ChessGame:
             "uci": move_info["move"],
             "san": move_info["san"],
             "turn": move_info["turn"],
+            "move_number": move_info["move_number"],
             "capture": move_info["capture"],
             "cp_loss": cp_loss,
         })
@@ -398,6 +399,57 @@ class ChessGame:
             "last_cp_losses": self.last_cp_losses(recent_cp_losses),
         }
 
+    # --- end-of-game summary, as consumed by the closing roast ---
+
+    def worst_blunder(self):
+        """The single costliest move of the game, or None if nothing was played.
+
+        Ties go to the earliest move: max() keeps the first maximum it sees, and the
+        first time a player threw the game away is the more interesting one.
+        """
+        if not self.move_log:
+            return None
+        return _summarize_move(max(self.move_log, key=lambda entry: entry["cp_loss"]))
+
+    def outcome_summary(self):
+        """How the game ended: {"result", "termination", "winner"}.
+
+        Termination is python-chess's own reason ("CHECKMATE", "STALEMATE",
+        "THREEFOLD_REPETITION", ...). A game that is still running reports "*" /
+        "UNFINISHED" rather than raising, so this is safe to call at any time.
+        """
+        outcome = self.board.outcome()
+        if outcome is None:
+            return {"result": "*", "termination": "UNFINISHED", "winner": None}
+
+        # outcome.winner is None on a draw, which is distinct from "white".
+        winner = None
+        if outcome.winner is not None:
+            winner = "white" if outcome.winner == chess.WHITE else "black"
+
+        return {
+            "result": outcome.result(),
+            "termination": outcome.termination.name,
+            "winner": winner,
+        }
+
+    def final_snapshot(self):
+        """A self-contained summary of the whole game, safe to hand to a worker thread.
+
+        Same contract as history_snapshot(), but for the closing roast: it wants the
+        entire game rather than a recent window, so the move list is deliberately
+        unbounded (a 60-move game is a few hundred tokens).
+        """
+        return {
+            **self.outcome_summary(),
+            "total_moves": self.board.fullmove_number,
+            "total_plies": len(self.move_log),
+            "captures": sum(1 for entry in self.move_log if entry["capture"]),
+            "average_cp_loss": self.average_cp_loss(),
+            "worst_blunder": self.worst_blunder(),
+            "moves": [_summarize_move(entry) for entry in self.move_log],
+        }
+
     def print_board(self):
         print(self.board)
 
@@ -415,6 +467,21 @@ class ChessGame:
     def __exit__(self, *exc):
         self.close()
         return False
+
+
+def _summarize_move(entry):
+    """One move_log entry, copied into the shape the closing roast reads.
+
+    move_number is read with .get(): it was added to move_log after the fact, so an entry
+    built before it existed reports None rather than blowing up.
+    """
+    return {
+        "move_number": entry.get("move_number"),
+        "san": entry["san"],
+        "uci": entry["uci"],
+        "turn": entry["turn"],
+        "cp_loss": entry["cp_loss"],
+    }
 
 
 def _piece_name(piece_type):

@@ -1,12 +1,18 @@
-import threading
-from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from chess_assistant import robot
-from chess_assistant.robot import PROMPT_END, Speaker, build_prompt, format_uci_for_speech
+from chess_assistant.robot import (
+    OUTRO_PROMPT_END,
+    PROMPT_END,
+    Speaker,
+    build_outro_prompt,
+    build_prompt,
+    format_uci_for_speech,
+)
+from chess_assistant.speech_clips import KOKORO_SAMPLE_RATE
 
 
 def move_info(**overrides):
@@ -124,19 +130,112 @@ def test_format_uci_for_speech(uci, spoken):
     assert format_uci_for_speech(uci) == spoken
 
 
+### The closing roast prompt
+
+def summary(**overrides):
+    """A ChessGame.final_snapshot() for a Scholar's mate."""
+    base = {
+        "result": "1-0",
+        "termination": "CHECKMATE",
+        "winner": "white",
+        "total_moves": 4,
+        "total_plies": 7,
+        "captures": 2,
+        "average_cp_loss": {"white": 12.5, "black": 88.0},
+        "worst_blunder": {
+            "move_number": 3, "turn": "black", "san": "Ke7", "uci": "e8e7", "cp_loss": 412,
+        },
+        "moves": [
+            {"move_number": 1, "san": "e4", "uci": "e2e4", "turn": "white", "cp_loss": 0},
+            {"move_number": 1, "san": "e5", "uci": "e7e5", "turn": "black", "cp_loss": 12},
+            {"move_number": 3, "san": "Ke7", "uci": "e8e7", "turn": "black", "cp_loss": 412},
+        ],
+        }
+    return {**base, **overrides}
+
+
+def test_outro_prompt_contains_the_result_and_the_stats():
+    prompt = build_outro_prompt(summary(), comment_history=[])
+
+    assert "Result: 1-0 (CHECKMATE)" in prompt
+    assert "Winner: white" in prompt
+    assert "Total moves: 4 (7 plies)" in prompt
+    assert "Captures: 2" in prompt
+    assert "Average centipawn loss - white: 12.5, black: 88.0" in prompt
+    assert "Worst blunder: turn 3, black, Ke7, 412 centipawns lost" in prompt
+    assert prompt.rstrip().endswith(OUTRO_PROMPT_END.format(max_words=60))
+
+
+def test_outro_prompt_lists_every_move_in_order():
+    prompt = build_outro_prompt(summary(), comment_history=[])
+
+    assert "1; white; e4; 0" in prompt
+    assert "1; black; e5; 12" in prompt
+    assert prompt.index("1; white; e4; 0") < prompt.index("3; black; Ke7; 412")
+
+
+def test_outro_prompt_renders_comment_history_for_callbacks():
+    comments = [
+        {"turn": 1, "side": "white", "move": "e2e4", "comment": "A bold start."},
+        {"turn": 2, "side": "black", "move": "e7e5", "comment": "Mirror, mirror."},
+    ]
+    prompt = build_outro_prompt(summary(), comment_history=comments)
+
+    first = prompt.index('Turn 1; white; e2e4; "A bold start."')
+    second = prompt.index('Turn 2; black; e7e5; "Mirror, mirror."')
+    assert first < second
+
+
+def test_outro_prompt_says_a_draw_has_no_winner():
+    """winner=None is a draw, not a missing value -- it must not render as 'None'."""
+    prompt = build_outro_prompt(
+        summary(result="1/2-1/2", termination="STALEMATE", winner=None), comment_history=[]
+    )
+
+    assert "Winner: nobody - it was a draw" in prompt
+    assert "None" not in prompt
+
+
+def test_outro_prompt_on_an_empty_game_does_not_leak_none():
+    """Nothing was ever played (an immediate draw): every section is empty and the model
+    should see prose, not a bare 'None' or a blank heading."""
+    prompt = build_outro_prompt(
+        summary(
+            result="1/2-1/2", termination="INSUFFICIENT_MATERIAL", winner=None,
+            total_moves=1, total_plies=0, captures=0,
+            average_cp_loss={"white": 0.0, "black": 0.0},
+            worst_blunder=None, moves=[],
+        ),
+        comment_history=[],
+    )
+
+    assert "None" not in prompt
+    assert "Worst blunder: (none - no moves were played)" in prompt
+    assert "(none - you did not comment on this game)" in prompt
+
+
 ### Pregeneration plumbing, exercised offline (no Claude, no Kokoro, no robot)
 
 class FakeClient:
-    """Stands in for anthropic.Anthropic(). Records the prompts it was asked to complete."""
+    """Stands in for anthropic.Anthropic(). Records the calls it was asked to complete."""
 
     def __init__(self):
-        self.prompts = []
+        self.calls = []
         self.messages = SimpleNamespace(create=self._create)
 
     def _create(self, *, model, max_tokens, system, messages):
-        self.prompts.append(messages[0]["content"])
-        text = f"comment #{len(self.prompts)}"
+        self.calls.append({
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": system,
+            "prompt": messages[0]["content"],
+        })
+        text = f"comment #{len(self.calls)}"
         return SimpleNamespace(content=[SimpleNamespace(type="text", text=text)])
+
+    @property
+    def prompts(self):
+        return [call["prompt"] for call in self.calls]
 
 
 class FakeGame:
@@ -158,27 +257,21 @@ class FakeGame:
             "last_cp_losses": {"white": [], "black": []},
         }
 
+    def final_snapshot(self):
+        return summary()
 
-class FakeSpeaker(Speaker):
-    """Speaker with the two slow, external dependencies swapped out. Everything else --
-    the executor, the cache, the turn reset, the history bookkeeping -- is the real thing."""
 
-    def __init__(self):
-        self.mini = None
-        self.client = FakeClient()
-        self.model = "claude-haiku-4-5"
-        self.max_tokens = 64
-        self.voice = "bm_george"
-        self.n_recent_moves = 6
-        self.n_recent_cp_losses = 5
-        self.comment_history = []
-        self.pregenerated_comments = {}
-        self.turn = 0
-        self.executor = ThreadPoolExecutor(max_workers=2)
-        self.pipeline_lock = threading.Lock()
+def _tone(seconds=0.1, hz=180.0):
+    """Stand-in for a Kokoro waveform. Must not be silence: trim() correctly reduces silence
+    to length 0, which would leave every baked clip empty."""
+    t = np.arange(int(seconds * KOKORO_SAMPLE_RATE), dtype=np.float32) / KOKORO_SAMPLE_RATE
+    return (0.5 * np.sin(2 * np.pi * hz * t)).astype(np.float32)
 
-    def _synthesize(self, text):
-        return np.zeros(16, dtype=np.float32)
+
+def _fake_synthesize(self, text):
+    self.synthesized = getattr(self, "synthesized", [])
+    self.synthesized.append(text)
+    return _tone()
 
 
 def candidate(uci, **overrides):
@@ -192,10 +285,24 @@ def candidate(uci, **overrides):
 
 
 @pytest.fixture
-def speaker(monkeypatch):
+def speaker(monkeypatch, tmp_path):
+    """The real Speaker with only its externals swapped out.
+
+    Deliberately not a hand-written subclass mirroring __init__: that mirror silently drifts
+    every time __init__ gains an attribute. Running the real one also exercises load_or_bake,
+    the manifest round-trip and the clip dict for free on every test below.
+    """
+    played = []
+    monkeypatch.setattr(robot, "KPipeline", lambda **kwargs: None)
+    monkeypatch.setattr(robot.anthropic, "Anthropic", FakeClient)
     # comment_on_move plays through mini.media, which we don't have.
-    monkeypatch.setattr(robot, "play", lambda *args, **kwargs: None)
-    spk = FakeSpeaker()
+    monkeypatch.setattr(robot, "play", lambda mini, audio, **kwargs: played.append(audio))
+    monkeypatch.setattr(robot, "CLIP_CACHE_DIR", tmp_path)  # never touch the real .cache
+    monkeypatch.setattr(Speaker, "_synthesize", _fake_synthesize)
+
+    spk = Speaker(mini=None, config={"speaker": {"voice": "bm_george"}})
+    spk.played = played
+    spk.synthesized = []  # forget the bake; the tests below care about the hot path
     yield spk
     spk.shutdown()
 
@@ -254,6 +361,119 @@ def test_comment_on_move_records_comment_history(speaker):
     speaker.comment_on_move("b8c6", nxt["move_info"], game)
 
     assert 'Turn 3; white; g1f3; "comment #1"' in speaker.client.prompts[1]
+
+
+### Move suggestions are spliced from pregenerated clips, never synthesized
+
+def test_suggest_move_never_synthesizes(speaker):
+    """The whole point of the clip library. Kokoro runs at ~0.6x realtime, so synthesizing here
+    put ~2.2s between accepting a move and hearing it -- on the main thread, holding the lock
+    the comment worker needs."""
+    speaker.suggest_move("e2e4", candidate("e2e4")["move_info"])
+
+    assert speaker.synthesized == []
+    assert len(speaker.played) == 1
+
+
+def test_suggest_move_splices_origin_destination_and_the_gap(speaker):
+    speaker.suggest_move("e2e4", candidate("e2e4")["move_info"])
+
+    origin, destination = speaker.clips["origin/e2"], speaker.clips["dest/e4"]
+    gap = int(speaker.splice_gap_ms * KOKORO_SAMPLE_RATE / 1000)
+    assert len(speaker.played[0]) == len(origin) + len(destination) + gap
+
+
+def test_suggest_move_speaks_castling_as_a_single_clip(speaker):
+    speaker.suggest_move("e1g1", candidate("e1g1", castle="kingside")["move_info"])
+
+    assert speaker.synthesized == []
+    assert np.array_equal(speaker.played[0], speaker.clips["castle/kingside"])
+
+
+def test_suggest_move_falls_back_to_live_synthesis_if_a_clip_is_missing(speaker):
+    """Shouldn't happen (test_speech_clips pins the inventory), but if it does: be slow, like
+    before, rather than silent."""
+    speaker.clips.pop("dest/e4")
+
+    speaker.suggest_move("e2e4", candidate("e2e4")["move_info"])
+
+    assert speaker.synthesized == ["E2 to E4?"]
+    assert len(speaker.played) == 1
+
+
+def test_speaker_derives_the_language_from_the_voice(monkeypatch, tmp_path):
+    """Hardcoding lang_code="b" while leaving voice configurable gives an American voice read
+    by a British G2P."""
+    lang_codes = []
+    monkeypatch.setattr(robot, "KPipeline", lambda **kwargs: lang_codes.append(kwargs["lang_code"]))
+    monkeypatch.setattr(robot.anthropic, "Anthropic", FakeClient)
+    monkeypatch.setattr(robot, "play", lambda *args, **kwargs: None)
+    monkeypatch.setattr(robot, "CLIP_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(Speaker, "_synthesize", _fake_synthesize)
+
+    spk = Speaker(mini=None, config={"speaker": {"voice": "am_michael"}})
+    spk.shutdown()
+
+    assert lang_codes == ["a"]
+
+
+### The closing roast, end to end (still no Claude, no Kokoro, no robot)
+
+def test_outro_is_generated_with_its_own_token_cap(speaker):
+    """The roast is three or four sentences. Reusing max_tokens (64, a one-liner cap) would
+    guillotine it mid-sentence -- and silently, since a truncated reply still parses."""
+    speaker.speak_outro(speaker.pregenerate_outro(FakeGame()))
+
+    call = speaker.client.calls[-1]
+    assert call["max_tokens"] == 200
+    assert call["system"] == robot.OUTRO_SYSTEM_PROMPT
+    assert "Result: 1-0 (CHECKMATE)" in call["prompt"]
+
+
+def test_outro_token_cap_is_configurable(monkeypatch, tmp_path):
+    monkeypatch.setattr(robot, "KPipeline", lambda **kwargs: None)
+    monkeypatch.setattr(robot.anthropic, "Anthropic", FakeClient)
+    monkeypatch.setattr(robot, "play", lambda *args, **kwargs: None)
+    monkeypatch.setattr(robot, "CLIP_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(Speaker, "_synthesize", _fake_synthesize)
+
+    spk = Speaker(mini=None, config={"speaker": {"outro": {"max_tokens": 500, "max_words": 30}}})
+    spk.speak_outro(spk.pregenerate_outro(FakeGame()))
+    spk.shutdown()
+
+    call = spk.client.calls[-1]
+    assert call["max_tokens"] == 500
+    assert "at most 30 words" in call["prompt"]
+
+
+def test_outro_sees_the_comment_history_it_built_during_the_game(speaker):
+    game = FakeGame()
+    move = candidate("g1f3")
+    speaker.pregenerate_comment(move, turn=1, game=game)
+    speaker.comment_on_move("g1f3", move["move_info"], game)
+
+    speaker.speak_outro(speaker.pregenerate_outro(game))
+
+    assert 'Turn 3; white; g1f3; "comment #1"' in speaker.client.calls[-1]["prompt"]
+
+
+def test_pregenerate_outro_drops_the_last_turns_candidates(speaker):
+    """Two workers, and the rejected candidates of the final turn may still be queued. Nobody
+    will ever consume those comments, so the roast must not wait behind them."""
+    game = FakeGame()
+    speaker.pregenerate_comment(candidate("g1f3"), turn=1, game=game)
+    speaker.pregenerate_comment(candidate("b1c3"), turn=1, game=game)
+
+    speaker.pregenerate_outro(game)
+
+    assert speaker.pregenerated_comments == {}
+
+
+def test_speak_outro_plays_the_roast(speaker):
+    comment = speaker.speak_outro(speaker.pregenerate_outro(FakeGame()))
+
+    assert comment == "comment #1"
+    assert len(speaker.played) == 1
 
 
 def test_comment_on_move_generates_inline_if_never_pregenerated(speaker):

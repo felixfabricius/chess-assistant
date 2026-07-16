@@ -11,17 +11,29 @@ from reachy_mini import ReachyMini
 
 from dotenv import load_dotenv
 
-load_dotenv()
+from chess_assistant.speech_clips import (
+    CLIP_CACHE_DIR,
+    DEFAULT_SPLICE_GAP_MS,
+    KOKORO_SAMPLE_RATE,
+    announcement_parts,
+    concat,
+    load_or_bake,
+)
 
-KOKORO_SAMPLE_RATE = 24000
+load_dotenv()
 
 DEFAULT_MODEL = "claude-haiku-4-5"
 DEFAULT_MAX_TOKENS = 64
 DEFAULT_VOICE = "bm_george"
 
+# The closing roast is a few sentences rather than a one-liner, so it cannot share
+# DEFAULT_MAX_TOKENS -- 64 would cut it off mid-sentence.
+DEFAULT_OUTRO_MAX_TOKENS = 200
+DEFAULT_OUTRO_MAX_WORDS = 60
+
 SYSTEM_PROMPT = (
     "You are a funny British chess commentator. I will provide you with context about a chess move and want you to return a one-liner. "
-    "Goal: entertainment. If possible, make the comment funny. But don't force it. Sometimes simple, neutral comments might be better. "
+    "Goal: entertainment. If possible, make the comment funny. But DON'T FORCE IT. Sometimes simple, neutral comments might be better. "
     "References to chess culture (Magnus Carlsen, Hikaru as successful player examples); 'Botez Gambit' when blundering a good piece; "
     "names of openings; are welcome! "
     "I will provide you with a move, the moved piece, the move turn (e.g. if 1st turn: can comment on game starting), whether it was "
@@ -32,15 +44,47 @@ SYSTEM_PROMPT = (
     "(aggressive playing) / without (potential pacifism comment) "
     "capture, and average and recent centipawn loss (can joke about it being very high (poor chess game), or low). "
     "Additionally, I will provide a list of the recent comments in this game, ordered by turn (earlier comments earlier), and by whose "
-    "turn it was during that comment. There might be potential for a funny callback; try avoid unintentionally repeating comments / phrases, though."
+    "turn it was during that comment. There might be potential for a funny callback; try avoid unintentionally repeating comments / phrases, though. "
+    "Also DO NOT FORCE callbacks, or refer to the same theme TOO often. "
 )
 PROMPT_END = (
     "Based on this, return a one-liner. Applaud solid moves, and roast bad ones. "
+    "Do NOT explicitly mention the centipawn loss number or centipawn loss concept. Listeners might not understand. "
     # Kokoro synthesis runs at roughly 0.6x realtime, so every spoken second costs ~0.6s of
     # synthesis. Keeping the comment short is what keeps it inside the move-review window --
     # and a rambling 'one-liner' is not a one-liner anyway.
     "Hard limit: at most 20 words, one sentence. Be punchy; cut any word that isn't earning its place. "
     "Return only the comment, with no preamble."
+)
+
+OUTRO_SYSTEM_PROMPT = (
+    "You are a funny British chess commentator, delivering the closing summary of a chess game "
+    "that has just ended. I will give you the final result, the full move list with the centipawn "
+    "loss of every move, the average centipawn loss per side, the worst blunder of the game, and "
+    "every comment you made during the game. "
+    "Write a short closing roast of the game as a whole. It must: "
+    "(1) refer to at least one specific thing that actually happened in THIS game -- a named move, "
+    "the worst blunder, the opening, or a callback to one of your own earlier comments; "
+    "(2) judge the overall quality of play from the average centipawn loss (higher is worse; under "
+    "30 is decent, over 100 is a bad game, a single move over 300 is a catastrophe) -- but read "
+    "those numbers silently and translate the verdict into plain English; "
+    "(3) end on the note that you are relieved this is finally over and would rather not be made to "
+    "do this again. Weary, deadpan, affectionate -- exhausted rather than cruel. "
+    "References to chess culture (Magnus Carlsen, Hikaru, the 'Botez Gambit', opening names) are "
+    "welcome. Do not repeat your earlier comments verbatim. "
+    # The numbers are in the prompt and the model reaches for them unprompted -- "a 412-point
+    # catastrophe" is not a sentence anyone says out loud. Say the move was terrible instead.
+    "Never say a centipawn number aloud, and never use the phrase 'centipawn' or refer to the "
+    "concept: this is spoken to people in a room, and they have no idea what it means. Say 'a "
+    "catastrophe' or 'a howler', not 'a 412-point blunder'."
+)
+OUTRO_PROMPT_END = (
+    "Based on this, deliver the closing summary. "
+    # Same arithmetic as PROMPT_END, with a longer budget: this one is allowed to be a few
+    # sentences, but it is still spoken aloud at ~0.6x realtime while the robot dances.
+    "Hard limit: at most {max_words} words, three or four sentences. "
+    "The final sentence must land the 'thank god that is over, please do not make me do this again' "
+    "note. Return only the summary, with no preamble."
 )
 
 
@@ -88,6 +132,17 @@ def _yes_no(value) -> str:
     return "yes" if value else "no"
 
 
+def _render_comment_history(comment_history: list, empty: str) -> list:
+    """The "Turn; side; move; comment" lines both prompts ask for, or `empty` if there
+    are none -- a bare 'None' or a blank section must never reach the model."""
+    if not comment_history:
+        return [empty]
+    return [
+        f"Turn {entry['turn']}; {entry['side']}; {entry['move']}; \"{entry['comment']}\""
+        for entry in comment_history
+    ]
+
+
 def build_prompt(move_info: dict, cp_loss: int, history: dict, comment_history: list) -> str:
     """Assemble the user turn: just the facts. The instructions live in SYSTEM_PROMPT."""
     capture = "no"
@@ -124,15 +179,58 @@ def build_prompt(move_info: dict, cp_loss: int, history: dict, comment_history: 
     ]
 
     lines += ["", "Comment history:"]
-    if comment_history:
-        for entry in comment_history:
-            lines.append(
-                f"Turn {entry['turn']}; {entry['side']}; {entry['move']}; \"{entry['comment']}\""
-            )
-    else:
-        lines.append("(none yet - this is the first comment of the game)")
+    lines += _render_comment_history(
+        comment_history, "(none yet - this is the first comment of the game)"
+    )
 
     lines += ["", PROMPT_END]
+    return "\n".join(lines)
+
+
+def build_outro_prompt(
+    summary: dict, comment_history: list, max_words: int = DEFAULT_OUTRO_MAX_WORDS
+) -> str:
+    """Assemble the user turn for the closing roast: just the facts, like build_prompt().
+
+    `summary` is ChessGame.final_snapshot(). Unlike the per-move prompt this gets the whole
+    game rather than a recent window -- the roast is meant to look back over all of it.
+    """
+    averages = summary["average_cp_loss"]
+    winner = summary["winner"] or "nobody - it was a draw"
+
+    lines = [
+        "Game over.",
+        f"Result: {summary['result']} ({summary['termination']})",
+        f"Winner: {winner}",
+        f"Total moves: {summary['total_moves']} ({summary['total_plies']} plies)",
+        f"Captures: {summary['captures']}",
+        f"Average centipawn loss - white: {averages['white']:.1f}, black: {averages['black']:.1f}",
+    ]
+
+    blunder = summary["worst_blunder"]
+    if blunder:
+        lines.append(
+            f"Worst blunder: turn {blunder.get('move_number')}, {blunder['turn']}, "
+            f"{blunder['san']}, {blunder['cp_loss']} centipawns lost"
+        )
+    else:
+        lines.append("Worst blunder: (none - no moves were played)")
+
+    lines += ["", "Full move list (turn; side; move; centipawn loss):"]
+    if summary["moves"]:
+        for entry in summary["moves"]:
+            lines.append(
+                f"{entry.get('move_number')}; {entry['turn']}; {entry['san']}; {entry['cp_loss']}"
+            )
+    else:
+        lines.append("(none - no moves were played)")
+
+    lines += ["", "Comment history:"]
+    lines += _render_comment_history(
+        comment_history, "(none - you did not comment on this game)"
+    )
+
+    lines += ["", OUTRO_PROMPT_END.format(max_words=max_words)]
     return "\n".join(lines)
 
 
@@ -146,16 +244,24 @@ class Speaker:
 
     def __init__(self, mini, config=None):
         speaker_config = config.get("speaker", {}) if config is not None else {}
+        outro_config = speaker_config.get("outro", {}) or {}
 
         self.mini = mini
-        self.pipeline = KPipeline(lang_code="b")
-        self.client = anthropic.Anthropic()
-
         self.model = speaker_config.get("model", DEFAULT_MODEL)
         self.max_tokens = speaker_config.get("max_tokens", DEFAULT_MAX_TOKENS)
         self.voice = speaker_config.get("voice", DEFAULT_VOICE)
         self.n_recent_moves = speaker_config.get("recent_moves", 6)
         self.n_recent_cp_losses = speaker_config.get("recent_cp_losses", 5)
+        self.splice_gap_ms = speaker_config.get("splice_gap_ms", DEFAULT_SPLICE_GAP_MS)
+        self.outro_max_tokens = outro_config.get("max_tokens", DEFAULT_OUTRO_MAX_TOKENS)
+        self.outro_max_words = outro_config.get("max_words", DEFAULT_OUTRO_MAX_WORDS)
+
+        # Kokoro's convention is that a voice's first letter is its language: "bm_george" is
+        # British, "am_michael" American. Deriving it keeps the two in step -- hardcoding "b"
+        # while leaving voice configurable buys you an American voice read by a British G2P.
+        lang_code = self.voice[0]
+        self.pipeline = KPipeline(lang_code=lang_code)
+        self.client = anthropic.Anthropic()
 
         # Turn-ordered so the "Turn; side; move; comment" lines the prompt asks for fall
         # straight out of it.
@@ -167,17 +273,36 @@ class Speaker:
         self.turn = 0
 
         self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pregen")
-        # KPipeline is a torch model with no thread-safety guarantees, and the main thread
-        # still synthesizes the "E2 to E4?" prompts while a worker synthesizes a comment.
+        # KPipeline is a torch model with no thread-safety guarantees, and a worker may be
+        # synthesizing a comment while the main thread bakes or falls back to live synthesis.
+        # Must exist before load_or_bake below, which synthesizes through _synthesize.
         self.pipeline_lock = threading.Lock()
+
+        # Every move suggestion is spliced from these, so nothing is synthesized on the
+        # critical path -- and the lock above stays free for the comment worker all through the
+        # review window, which is the runway main.py is banking on.
+        self.clips = load_or_bake(CLIP_CACHE_DIR, self.voice, lang_code, self._synthesize)
 
     def _synthesize(self, text: str) -> np.ndarray:
         with self.pipeline_lock:
             return synthesize(self.pipeline, text, voice=self.voice)
 
-    def suggest_move(self, move):
-        text = f"{format_uci_for_speech(move)}?"
-        play(self.mini, self._synthesize(text))
+    def suggest_move(self, move, move_info=None):
+        """Speak a candidate move aloud, e.g. "E2 to E4?".
+
+        `move_info` settles what the UCI cannot: "e1g1" is castling, or a queen walking from
+        e1 to g1. Without it, the four castling UCIs are assumed to be castles.
+        """
+        parts = announcement_parts(move, move_info)
+        missing = [key for key in parts if key not in self.clips]
+        if missing:
+            # Shouldn't happen: a test pins that every key assembly can emit is in the
+            # inventory. If it somehow does, be slow rather than silent -- this is exactly the
+            # pre-cache behaviour.
+            print(f"speech: no clip for {missing} -- falling back to live synthesis")
+            play(self.mini, self._synthesize(f"{format_uci_for_speech(move)}?"))
+            return
+        play(self.mini, concat([self.clips[key] for key in parts], self.splice_gap_ms))
 
     def pregenerate_comment(self, move: dict, turn: int, game) -> None:
         """Kick off comment generation for a candidate move and return immediately.
@@ -213,7 +338,7 @@ class Speaker:
 
         prompt = build_prompt(move_info, cp_loss, history, comment_history)
         message = self.client.messages.create(
-            model=self.model,
+            model="claude-sonnet-5",
             max_tokens=self.max_tokens,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
@@ -262,6 +387,48 @@ class Speaker:
     def exclaim_win(self, game):
         winner = "black" if game.board.turn == chess.WHITE else "white"
         play(self.mini, self._synthesize(f"{winner} won!!!"))
+
+    def pregenerate_outro(self, game):
+        """Kick off the closing roast and return its Future immediately.
+
+        Called the moment the game ends, so Claude and Kokoro work while the robot is
+        still exclaiming the win and dancing -- see outro.finale(), which uses this
+        future's done() as the signal to stop dancing.
+        """
+        # The last turn's rejected candidates may still be sitting in the queue, and there
+        # are only two workers. Nothing is going to consume those comments now -- the game
+        # is over -- so drop them rather than let the outro wait behind a Kokoro synthesis.
+        for future in self.pregenerated_comments.values():
+            future.cancel()
+        self.pregenerated_comments = {}
+
+        # Snapshot on the main thread, as ever: the worker must not read move_log or
+        # comment_history directly.
+        summary = game.final_snapshot()
+        comment_history = list(self.comment_history)
+
+        return self.executor.submit(self._generate_outro, summary, comment_history)
+
+    def _generate_outro(self, summary, comment_history):
+        """Runs on a worker thread. Never touches mini.media."""
+        prompt = build_outro_prompt(summary, comment_history, self.outro_max_words)
+        message = self.client.messages.create(
+            model="claude-sonnet-5",
+            # Not self.max_tokens: that is the one-liner cap, and it would guillotine the
+            # roast mid-sentence.
+            max_tokens=self.outro_max_tokens,
+            system=OUTRO_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        comment = next(block.text for block in message.content if block.type == "text")
+
+        return {"comment": comment, "audio": self._synthesize(comment)}
+
+    def speak_outro(self, future):
+        """Speak the closing roast. Blocks only if the worker is not done yet."""
+        result = future.result()
+        play(self.mini, result["audio"])
+        return result["comment"]
 
     def shutdown(self):
         self.executor.shutdown(wait=False, cancel_futures=True)
