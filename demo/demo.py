@@ -4,16 +4,36 @@ ONE_EXAMPLE_ONLY = True
 
 #%%
 import json
+import sys
 import torch
 import numpy as np # TODO: remove again
 from pathlib import Path
 
+import chess_assistant
 from chess_assistant.image_processing import Processor
 from chess_assistant.vision import BoardEstimate, BoardEstimator
 from chess_assistant.game import ChessGame
 from chess_assistant.config import PIECES, SQUARES, PIECE_DISPLAY
 
-setup_1_path = Path("demo/assets/setup_1")
+# Anchor every path to the repo root rather than the working directory, so the demo behaves
+# identically wherever it is launched from. chess_assistant is installed from
+# <repo>/src/chess_assistant, so its __file__ locates the repo without relying on __file__ of
+# this script (which is not defined when cells are run interactively).
+REPO_ROOT = Path(chess_assistant.__file__).resolve().parents[2]
+WEIGHTS_PATH = REPO_ROOT / "weights" / "model_state_dict.safetensors"
+OUT_DIR = REPO_ROOT / "demo" / "out" / "setup_1"
+
+# Run with --pause to walk through the demo one step at a time.
+PAUSE = "--pause" in sys.argv
+
+
+def pause(next_step: str) -> None:
+    """Wait for Enter before `next_step`, but only when running with --pause."""
+    if PAUSE:
+        input(f"\n  [Press Enter to {next_step}] ")
+
+
+setup_1_path = REPO_ROOT / "demo" / "assets" / "setup_1"
 calibration_metadata_path = setup_1_path / "calibration_metadata.json"
 position_info = {
     "position_1": {
@@ -28,7 +48,7 @@ position_info = {
 positions = list(position_info.keys())
 
 def warp_image(img_path: Path, calibration_metadata_path: Path, img_processor, position: str) -> Path:
-    warped_image_path = img_processor.warp(img_path, Path("demo/out/setup_1") / position / "warped_image.png")
+    warped_image_path = img_processor.warp(img_path, OUT_DIR / position / "warped_image.png")
     return warped_image_path
 
 def cutout_squares(img_processor: Processor, warped_image_path: Path) -> Path:
@@ -46,7 +66,7 @@ def estimate_move(
     board_estimator = BoardEstimator(
         model_type="CNN",
         calibration_metadata_path=calibration_metadata_path,
-        model_weights_path=Path("weights/model_state_dict.safetensors")
+        model_weights_path=WEIGHTS_PATH
     )
     board_estimate = board_estimator.estimate_board(squares_dir)
     
@@ -121,6 +141,7 @@ if ONE_EXAMPLE_ONLY:
 img_processor = Processor(calibration_metadata_path)
 
 # %%
+pause("warp the image")
 for position in positions:
     img_path = position_info[position]["img_path"]
     warped_image_path = warp_image(img_path, calibration_metadata_path, img_processor, position)
@@ -134,9 +155,11 @@ for position in positions:
     ))
 
 #%%
-for position in positions:  
+pause("cut out the individual squares")
+for position in positions:
     warped_img_path = position_info[position]["warped_img_path"]
-    squares_dir = cutout_squares(img_processor, warped_image_path)
+    squares_dir = cutout_squares(img_processor, warped_img_path)
+    position_info[position]["squares_dir"] = squares_dir
     print((
         f"Cutting out individual squares for {position}\n"
         "---------------------------------------------\n"
@@ -149,6 +172,7 @@ for position in positions:
     ))
 
 #%%
+pause("estimate the move")
 for position in positions:
     with open(position_info[position]["metadata_path"], "r", encoding="utf-8") as f:
         metadata = json.load(f)
@@ -156,7 +180,7 @@ for position in positions:
         move = metadata["move_uci"]
         position_info[position]["move"] = move
     estimated_moves, board_estimate = estimate_move(
-        squares_dir,
+        position_info[position]["squares_dir"],
         calibration_metadata_path,
         position_info[position]["previous_position"]
     )
@@ -177,5 +201,6 @@ for position in positions:
     )
 
 #%%
+pause("evaluate the square estimates against the true board")
 for position in positions:
     evaluate_estimate(position_info[position]["board_estimate"], position_info[position]["metadata_path"], position)
